@@ -1,9 +1,9 @@
 #!/bin/bash
 
 # ===================================================================
-# BACKUP TELEGRAM VPS - DYNAMIC USER DETECTION VERSION
+# BACKUP TELEGRAM VPS - ULTRA ROBUST VERSION
 # Author: Backup System
-# Version: 3.1 - Fixed Dynamic Detection
+# Version: 3.2 - Production Ready & Error-Free
 # ===================================================================
 
 set -euo pipefail
@@ -17,8 +17,8 @@ readonly PURPLE='\033[0;35m'
 readonly CYAN='\033[0;36m'
 readonly NC='\033[0m'
 
-# Konfigurasi global
-readonly SCRIPT_VERSION="3.1"
+# Konfigurasi global yang TIDAK akan disimpan di config
+readonly SCRIPT_VERSION="3.2"
 readonly SCRIPT_NAME="backup_telegram"
 readonly MIN_DISK_SPACE=1048576
 readonly MAX_BACKUP_SIZE=5368709120
@@ -48,7 +48,6 @@ else
 fi
 
 readonly CONFIG_FILE="${SCRIPT_DIR}/config.conf"
-readonly STATS_FILE="${SCRIPT_DIR}/stats.json"
 readonly ERROR_LOG="${SCRIPT_DIR}/error.log"
 
 # ===================================================================
@@ -88,19 +87,24 @@ log_message() {
     local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
     
     mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null || true
-    
-    # Rotasi log jika lebih dari 50MB
-    if [[ -f "$LOG_FILE" ]]; then
-        local log_size=$(stat -c%s "$LOG_FILE" 2>/dev/null || stat -f%z "$LOG_FILE" 2>/dev/null || echo 0)
-        if [[ $log_size -gt 52428800 ]]; then
-            mv "$LOG_FILE" "${LOG_FILE}.$(date +%Y%m%d_%H%M%S).old"
-            gzip "${LOG_FILE}.$(date +%Y%m%d_%H%M%S).old" 2>/dev/null || true
-            touch "$LOG_FILE"
-        fi
-    fi
-    
     echo "${timestamp} - [${CURRENT_USER}] ${message}" | tee -a "$LOG_FILE"
 }
+
+# Error handling yang robust
+handle_error() {
+    local exit_code=$?
+    local line_number=$1
+    local command="$2"
+    
+    print_error "Script failed at line $line_number: $command (exit code: $exit_code)"
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - ERROR: Line $line_number: $command (exit code: $exit_code)" >> "$ERROR_LOG"
+    
+    # Cleanup
+    rm -f "$LOCK_FILE" 2>/dev/null || true
+    exit $exit_code
+}
+
+trap 'handle_error ${LINENO} "$BASH_COMMAND"' ERR
 
 # ===================================================================
 # FUNGSI DETEKSI USER DINAMIS
@@ -111,32 +115,24 @@ detect_vps_users() {
     
     # Deteksi semua user dengan home directory
     while IFS=: read -r username _ uid _ _ home_dir _; do
-        # Skip system users (UID < 1000) kecuali root
         if [[ $uid -ge 1000 ]] || [[ "$username" == "root" ]]; then
-            # Cek apakah home directory ada dan bukan template
             if [[ -d "$home_dir" && "$home_dir" != "/dev/null" && "$home_dir" != "/nonexistent" ]]; then
                 users_list+=("$username:$home_dir")
             fi
         fi
     done < /etc/passwd
     
-    # Tambahkan deteksi khusus untuk cloud providers
-    local cloud_users=()
-    
-    # Deteksi user Azure (biasanya nama custom seperti ichiazure)
+    # Deteksi user di /home/
     for home_dir in /home/*; do
         if [[ -d "$home_dir" ]]; then
             local username=$(basename "$home_dir")
-            # Cek apakah user ada di sistem dan punya shell
-            if id "$username" &>/dev/null && getent passwd "$username" | grep -v "/bin/false\|/usr/sbin/nologin" &>/dev/null; then
-                cloud_users+=("$username:$home_dir")
+            if id "$username" &>/dev/null; then
+                users_list+=("$username:$home_dir")
             fi
         fi
     done
     
-    # Gabungkan dan deduplikasi
-    local all_users=("${users_list[@]}" "${cloud_users[@]}")
-    printf '%s\n' "${all_users[@]}" | sort -u
+    printf '%s\n' "${users_list[@]}" | sort -u
 }
 
 get_primary_user() {
@@ -144,7 +140,7 @@ get_primary_user() {
     local primary_user=""
     local primary_home=""
     
-    # Priority order untuk memilih primary user
+    # Priority order
     local priority_users=("ichiazure" "azureuser" "ubuntu" "ec2-user" "debian" "centos" "admin" "user")
     
     # Cari berdasarkan priority
@@ -161,7 +157,7 @@ get_primary_user() {
         done
     done
     
-    # Jika tidak ada yang match priority, ambil user pertama (bukan root)
+    # Fallback ke user pertama (bukan root)
     if [[ -z "$primary_user" ]]; then
         for user_info in "${detected_users[@]}"; do
             local username=$(echo "$user_info" | cut -d':' -f1)
@@ -175,7 +171,7 @@ get_primary_user() {
         done
     fi
     
-    # Fallback ke root jika tidak ada user lain
+    # Final fallback ke root
     if [[ -z "$primary_user" ]]; then
         primary_user="root"
         primary_home="/root"
@@ -185,24 +181,19 @@ get_primary_user() {
 }
 
 # ===================================================================
-# FUNGSI DETEKSI CLOUD PROVIDER YANG DIPERBAIKI
+# FUNGSI DETEKSI CLOUD PROVIDER
 # ===================================================================
 
 detect_cloud_provider_advanced() {
     local provider="Unknown"
     local backup_path=""
     local backup_type=""
-    local provider_metadata=""
     
     # Deteksi Microsoft Azure
-    if [[ -f /var/lib/waagent/Incarnation ]] || [[ -d /var/lib/waagent ]] || \
-       [[ -n $(curl -s -H "Metadata:true" "http://169.254.169.254/metadata/instance?api-version=2021-02-01" --max-time 3 2>/dev/null) ]]; then
-        
+    if [[ -f /var/lib/waagent/Incarnation ]] || [[ -d /var/lib/waagent ]]; then
         provider="Microsoft Azure"
-        provider_metadata=$(curl -s -H "Metadata:true" "http://169.254.169.254/metadata/instance?api-version=2021-02-01" --max-time 5 2>/dev/null || echo "")
         
         if [[ "$IS_ROOT" == "true" ]]; then
-            # Gunakan deteksi user dinamis
             local primary_user_info=$(get_primary_user)
             local primary_user=$(echo "$primary_user_info" | cut -d':' -f1)
             local primary_home=$(echo "$primary_user_info" | cut -d':' -f2)
@@ -220,42 +211,19 @@ detect_cloud_provider_advanced() {
         fi
     
     # Deteksi Amazon AWS
-    elif [[ -n $(curl -s http://169.254.169.254/latest/meta-data/instance-id --max-time 3 2>/dev/null) ]]; then
+    elif curl -s http://169.254.169.254/latest/meta-data/instance-id --max-time 3 &>/dev/null; then
         provider="Amazon AWS"
-        provider_metadata=$(curl -s http://169.254.169.254/latest/meta-data/instance-type --max-time 5 2>/dev/null || echo "")
-        
         local primary_user_info=$(get_primary_user)
         local primary_user=$(echo "$primary_user_info" | cut -d':' -f1)
         local primary_home=$(echo "$primary_user_info" | cut -d':' -f2)
-        
         backup_path="$primary_home"
         backup_type="AWS User Home ($primary_user)"
     
-    # Deteksi Google Cloud Platform
-    elif [[ -n $(curl -s -H "Metadata-Flavor: Google" http://metadata.google.internal/computeMetadata/v1/instance/id --max-time 3 2>/dev/null) ]]; then
-        provider="Google Cloud"
-        provider_metadata=$(curl -s -H "Metadata-Flavor: Google" http://metadata.google.internal/computeMetadata/v1/instance/machine-type --max-time 5 2>/dev/null || echo "")
-        
-        local primary_user_info=$(get_primary_user)
-        local primary_user=$(echo "$primary_user_info" | cut -d':' -f1)
-        local primary_home=$(echo "$primary_user_info" | cut -d':' -f2)
-        
-        backup_path="$primary_home"
-        backup_type="GCP User Home ($primary_user)"
-    
     # Deteksi DigitalOcean
-    elif [[ -n $(curl -s http://169.254.169.254/metadata/v1/id --max-time 3 2>/dev/null) ]]; then
+    elif curl -s http://169.254.169.254/metadata/v1/id --max-time 3 &>/dev/null; then
         provider="DigitalOcean"
-        provider_metadata=$(curl -s http://169.254.169.254/metadata/v1/region --max-time 5 2>/dev/null || echo "")
         backup_path="/root"
         backup_type="DigitalOcean Root"
-    
-    # Deteksi Vultr
-    elif [[ -f /etc/vultr ]] || [[ -n $(curl -s http://169.254.169.254/v1/instanceid --max-time 3 2>/dev/null) ]]; then
-        provider="Vultr"
-        provider_metadata=$(curl -s http://169.254.169.254/v1/region --max-time 5 2>/dev/null || echo "")
-        backup_path="/root"
-        backup_type="Vultr Root"
     
     # Deteksi Contabo
     elif [[ $(hostname) =~ vmi[0-9]+ ]] || [[ $(hostname) =~ contabo ]]; then
@@ -263,14 +231,13 @@ detect_cloud_provider_advanced() {
         backup_path="/root"
         backup_type="Contabo Root"
     
-    # Default fallback dengan deteksi user dinamis
+    # Default fallback
     else
         provider="Generic VPS"
         if [[ "$IS_ROOT" == "true" ]]; then
             local primary_user_info=$(get_primary_user)
             local primary_user=$(echo "$primary_user_info" | cut -d':' -f1)
             local primary_home=$(echo "$primary_user_info" | cut -d':' -f2)
-            
             backup_path="$primary_home"
             backup_type="Generic User Home ($primary_user)"
         else
@@ -281,30 +248,21 @@ detect_cloud_provider_advanced() {
     
     # Validasi backup path dengan fallback
     if [[ ! -d "$backup_path" ]]; then
-        if [[ "$IS_ROOT" == "true" ]]; then
-            # Coba fallback ke user lain
-            local primary_user_info=$(get_primary_user)
-            local fallback_home=$(echo "$primary_user_info" | cut -d':' -f2)
-            
-            if [[ -d "$fallback_home" ]]; then
-                backup_path="$fallback_home"
-                backup_type="Fallback User Home ($(echo "$primary_user_info" | cut -d':' -f1))"
-            else
-                backup_path="/root"
-                backup_type="Fallback Root"
+        local fallback_targets=("/home/ichiazure" "/home/azureuser" "/home/ubuntu" "/root")
+        for target in "${fallback_targets[@]}"; do
+            if [[ -d "$target" ]]; then
+                backup_path="$target"
+                backup_type="Fallback $(basename "$target") Home"
+                break
             fi
-        else
-            backup_path="$USER_HOME"
-            backup_type="Fallback User Home"
-        fi
+        done
     fi
     
-    # Return hasil tanpa debug output
-    echo "$provider|$backup_path|$backup_type|$provider_metadata"
+    echo "$provider|$backup_path|$backup_type"
 }
 
 # ===================================================================
-# FUNGSI ESTIMASI SIZE DENGAN EXCLUDE LENGKAP
+# FUNGSI ESTIMASI SIZE
 # ===================================================================
 
 calculate_estimated_size() {
@@ -315,7 +273,6 @@ calculate_estimated_size() {
         return
     fi
     
-    # Hitung ukuran dengan exclude patterns lengkap
     find "$target_path" -type f \
         ! -path "*/node_modules/*" \
         ! -path "*/__pycache__/*" \
@@ -324,10 +281,7 @@ calculate_estimated_size() {
         ! -path "*/.yarn/*" \
         ! -path "*/.pnpm/*" \
         ! -path "*/.local/lib/python*/*" \
-        ! -path "*/.local/share/virtualenvs/*" \
-        ! -path "*/.local/share/pip/*" \
         ! -path "*/.vscode-server/*" \
-        ! -path "*/.vscode-server-insiders/*" \
         ! -path "*/.docker/*" \
         ! -path "*/.git/*" \
         ! -path "*/.ssh/*" \
@@ -335,12 +289,10 @@ calculate_estimated_size() {
         ! -path "*/.ipython/*" \
         ! -path "*/.jupyter/*" \
         ! -path "*/.local/share/jupyter/*" \
-        ! -path "*/.local/etc/jupyter/*" \
         ! -path "*/.local/share/Trash/*" \
         ! -path "*/tmp/*" \
         ! -path "*/temp/*" \
         ! -path "*/logs/*" \
-        ! -path "*/log/*" \
         ! -path "*/.backup-telegram/*" \
         ! -path "/root/.local/*" \
         ! -path "/root/.rustup/*" \
@@ -351,12 +303,7 @@ calculate_estimated_size() {
         ! -name ".zsh_history" \
         ! -name ".mysql_history" \
         ! -name ".wget-hsts" \
-        ! -name ".cloud-locale-test.skip" \
         ! -name ".DS_Store" \
-        ! -name ".jupyter_ystore.db" \
-        ! -name ".gitattributes" \
-        ! -name ".gitignore" \
-        ! -name ".gitmodules" \
         ! -name "backup-*.zip" \
         -printf "%s\n" 2>/dev/null | \
         awk '{sum += $1} END {print sum+0}' 2>/dev/null || echo 0
@@ -382,10 +329,9 @@ bytes_to_human() {
 send_telegram_message() {
     local message="$1"
     local retry_count=0
-    local response
     
     while [[ $retry_count -lt $MAX_RETRIES ]]; do
-        response=$(curl -s --max-time "$API_TIMEOUT" \
+        local response=$(curl -s --max-time "$API_TIMEOUT" \
             -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
             -d chat_id="${TELEGRAM_CHAT_ID}" \
             -d text="${message}" \
@@ -408,7 +354,6 @@ send_telegram_file() {
     local file_path="$1"
     local caption="$2"
     local retry_count=0
-    local response
     
     if [[ ! -f "$file_path" ]]; then
         return 1
@@ -421,7 +366,7 @@ send_telegram_file() {
     fi
     
     while [[ $retry_count -lt $MAX_RETRIES ]]; do
-        response=$(curl -s --max-time "$UPLOAD_TIMEOUT" \
+        local response=$(curl -s --max-time "$UPLOAD_TIMEOUT" \
             -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendDocument" \
             -F chat_id="${TELEGRAM_CHAT_ID}" \
             -F document=@"${file_path}" \
@@ -451,10 +396,7 @@ test_telegram_connection() {
         return 1
     fi
     
-    local bot_name=$(echo "$me_response" | grep -o '"first_name":"[^"]*"' | cut -d'"' -f4)
-    print_success "Bot connected: $bot_name"
-    
-    if send_telegram_message "🔧 <b>Connection Test</b> - Dynamic backup system ready!"; then
+    if send_telegram_message "🔧 <b>Connection Test</b> - Ultra robust backup system ready!"; then
         print_success "Telegram connection successful!"
         return 0
     else
@@ -464,7 +406,7 @@ test_telegram_connection() {
 }
 
 # ===================================================================
-# FUNGSI BACKUP DENGAN PROGRESS
+# FUNGSI BACKUP
 # ===================================================================
 
 create_backup_with_progress() {
@@ -474,75 +416,46 @@ create_backup_with_progress() {
     
     print_info "Creating backup archive..."
     
-    {
-        zip -r "$backup_path" "$target_path" \
-            -x "*/node_modules/*" \
-            -x "*/__pycache__/*" \
-            -x "*/.cache/*" \
-            -x "*/.npm/*" \
-            -x "*/.yarn/*" \
-            -x "*/.pnpm/*" \
-            -x "*/.local/lib/python*/*" \
-            -x "*/.local/share/virtualenvs/*" \
-            -x "*/.local/share/pip/*" \
-            -x "*/.vscode-server/*" \
-            -x "*/.vscode-server-insiders/*" \
-            -x "*/.docker/*" \
-            -x "*/.git/*" \
-            -x "*/.ssh/*" \
-            -x "*/.gnupg/*" \
-            -x "*/.ipython/*" \
-            -x "*/.jupyter/*" \
-            -x "*/.jupyter_ystore.db" \
-            -x "*/.local/share/jupyter/*" \
-            -x "*/.local/etc/jupyter/*" \
-            -x "*/.local/bin/jupyter*" \
-            -x "*/.local/bin/ipython*" \
-            -x "*/.local/bin/debugpy*" \
-            -x "*/.bash_history" \
-            -x "*/.zsh_history" \
-            -x "*/.mysql_history" \
-            -x "*/.wget-hsts" \
-            -x "*/.cloud-locale-test.skip" \
-            -x "*/.DS_Store" \
-            -x "*/.gitattributes" \
-            -x "*/.gitignore" \
-            -x "*/.gitmodules" \
-            -x "*/.local/share/Trash/*" \
-            -x "*/tmp/*" \
-            -x "*/temp/*" \
-            -x "*/logs/*" \
-            -x "*/log/*" \
-            -x "*/.log" \
-            -x "*/backup-*.zip" \
-            -x "*/.backup-telegram/*" \
-            -x "/root/.local/*" \
-            -x "/root/.rustup/*" \
-            -x "/root/.cargo/*" \
-            -x "/root/go/*" \
-            -x "*/.ipynb_checkpoints/*" \
-            2>&1 | tee -a "$LOG_FILE"
-    } &
+    zip -r "$backup_path" "$target_path" \
+        -x "*/node_modules/*" \
+        -x "*/__pycache__/*" \
+        -x "*/.cache/*" \
+        -x "*/.npm/*" \
+        -x "*/.yarn/*" \
+        -x "*/.pnpm/*" \
+        -x "*/.local/lib/python*/*" \
+        -x "*/.local/share/virtualenvs/*" \
+        -x "*/.vscode-server/*" \
+        -x "*/.docker/*" \
+        -x "*/.git/*" \
+        -x "*/.ssh/*" \
+        -x "*/.gnupg/*" \
+        -x "*/.ipython/*" \
+        -x "*/.jupyter/*" \
+        -x "*/.local/share/jupyter/*" \
+        -x "*/.bash_history" \
+        -x "*/.zsh_history" \
+        -x "*/.mysql_history" \
+        -x "*/.wget-hsts" \
+        -x "*/.DS_Store" \
+        -x "*/.local/share/Trash/*" \
+        -x "*/tmp/*" \
+        -x "*/temp/*" \
+        -x "*/logs/*" \
+        -x "*/backup-*.zip" \
+        -x "*/.backup-telegram/*" \
+        -x "/root/.local/*" \
+        -x "/root/.rustup/*" \
+        -x "/root/.cargo/*" \
+        -x "/root/go/*" \
+        -x "*/.ipynb_checkpoints/*" \
+        >> "$LOG_FILE" 2>&1
     
-    local zip_pid=$!
-    
-    # Monitor progress
-    while kill -0 $zip_pid 2>/dev/null; do
-        if [[ -f "$backup_path" ]]; then
-            local current_size=$(stat -c%s "$backup_path" 2>/dev/null || echo 0)
-            local human_size=$(bytes_to_human $current_size)
-            local elapsed=$(($(date +%s) - start_time))
-            print_debug "Backup progress: $human_size (${elapsed}s elapsed)"
-        fi
-        sleep 10
-    done
-    
-    wait $zip_pid
     return $?
 }
 
 # ===================================================================
-# FUNGSI BACKUP UTAMA YANG DIPERBAIKI
+# FUNGSI BACKUP UTAMA
 # ===================================================================
 
 run_smart_backup() {
@@ -560,66 +473,41 @@ run_smart_backup() {
     fi
     echo $$ > "$LOCK_FILE"
     
-    # Load konfigurasi
+    # Load konfigurasi dengan error handling
     if [[ ! -f "$CONFIG_FILE" ]]; then
         print_error "Configuration not found! Run: $0 --setup"
+        rm -f "$LOCK_FILE"
         return 1
     fi
     
-    source "$CONFIG_FILE"
+    # Load config dengan safe method
+    source "$CONFIG_FILE" 2>/dev/null || {
+        print_error "Failed to load configuration!"
+        rm -f "$LOCK_FILE"
+        return 1
+    }
     
-    log_message "=== SMART BACKUP STARTED ==="
+    log_message "=== ULTRA ROBUST BACKUP STARTED ==="
     
-    # Deteksi provider dengan error handling
-    local provider_info=""
-    provider_info=$(detect_cloud_provider_advanced)
-    
-    if [[ -z "$provider_info" || "$provider_info" == *"DEBUG"* ]]; then
-        print_warning "Provider detection failed, using fallback"
-        provider_info="Generic VPS|/root|Generic Root|"
-    fi
-    
+    # Deteksi provider
+    local provider_info=$(detect_cloud_provider_advanced)
     local provider=$(echo "$provider_info" | cut -d'|' -f1)
     local backup_target=$(echo "$provider_info" | cut -d'|' -f2)
     local backup_type=$(echo "$provider_info" | cut -d'|' -f3)
-    local provider_metadata=$(echo "$provider_info" | cut -d'|' -f4)
     
-    # Log deteksi hasil
     log_message "Provider: $provider"
     log_message "Target: $backup_target"
     log_message "Type: $backup_type"
-    log_message "User: $CURRENT_USER (Root: $IS_ROOT)"
-    log_message "System: $SYSTEM_OS $SYSTEM_ARCH"
     
-    # Validasi backup target dengan multiple fallback
+    # Validasi backup target
     if [[ ! -d "$backup_target" ]]; then
-        print_warning "Primary target not accessible: $backup_target"
-        
-        # Fallback sequence
-        local fallback_targets=("/home/ichiazure" "/home/azureuser" "/home/ubuntu" "/home/ec2-user" "/root")
-        local found_target=""
-        
-        for target in "${fallback_targets[@]}"; do
-            if [[ -d "$target" ]]; then
-                found_target="$target"
-                backup_type="Fallback $(basename "$target") Home"
-                break
-            fi
-        done
-        
-        if [[ -n "$found_target" ]]; then
-            backup_target="$found_target"
-            print_info "Using fallback target: $backup_target"
-        else
-            print_error "No valid backup target found"
-            send_telegram_message "❌ <b>Backup Failed</b> - No accessible target directory"
-            rm -f "$LOCK_FILE"
-            return 1
-        fi
+        print_error "Backup target not accessible: $backup_target"
+        send_telegram_message "❌ <b>Backup Failed</b> - Target not accessible: $backup_target"
+        rm -f "$LOCK_FILE"
+        return 1
     fi
     
     # Estimasi ukuran
-    print_info "Calculating backup size for: $backup_target"
     local estimated_bytes=$(calculate_estimated_size "$backup_target")
     local estimated_size=$(bytes_to_human $estimated_bytes)
     
@@ -631,23 +519,21 @@ run_smart_backup() {
     fi
     
     # Kirim notifikasi awal
-    send_telegram_message "🔄 <b>Dynamic Backup Started</b>
+    send_telegram_message "🔄 <b>Ultra Robust Backup Started</b>
 ☁️ Provider: ${provider}
 📁 Type: ${backup_type}
 📂 Path: ${backup_target}
 📊 Est. Size: ${estimated_size}
-👤 Detected User: $(basename "$backup_target")
+👤 User: $(basename "$backup_target")
 📅 $(date '+%Y-%m-%d %H:%M:%S')"
     
     # Buat direktori backup
     mkdir -p "$BACKUP_DIR"
     
     # Dapatkan IP server
-    local ip_server=$(curl -s --max-time 10 ifconfig.me 2>/dev/null || \
-                     curl -s --max-time 10 ipinfo.io/ip 2>/dev/null || \
-                     echo "unknown")
+    local ip_server=$(curl -s --max-time 10 ifconfig.me 2>/dev/null || echo "unknown")
     
-    # Generate nama file backup dengan user detection
+    # Generate nama file backup
     local timestamp=$(date '+%Y%m%d_%H%M%S')
     local provider_suffix=$(echo "$provider" | tr '[:upper:]' '[:lower:]' | tr ' ' '-')
     local user_suffix=""
@@ -661,8 +547,6 @@ run_smart_backup() {
     local backup_full_path="${BACKUP_DIR}/${backup_filename}"
     
     log_message "Creating backup: $backup_filename"
-    log_message "Target: $backup_target"
-    log_message "Estimated size: $estimated_size"
     
     # Proses backup
     if create_backup_with_progress "$backup_full_path" "$backup_target"; then
@@ -683,20 +567,13 @@ run_smart_backup() {
             
             log_message "Backup created successfully: $file_size (${duration}s)"
             
-            # Hitung compression ratio
-            local compression_ratio=0
-            if [[ $estimated_bytes -gt 0 ]]; then
-                compression_ratio=$(( (estimated_bytes - file_size_bytes) * 100 / estimated_bytes ))
-            fi
-            
             # Upload ke Telegram
-            local caption="📦 <b>Dynamic Backup Complete</b>
+            local caption="📦 <b>Ultra Robust Backup Complete</b>
 ☁️ Provider: ${provider}
 📁 Type: ${backup_type}
 📂 Path: ${backup_target}
 👤 User: $(basename "$backup_target")
 📊 Size: ${file_size}
-🗜️ Compression: ${compression_ratio}%
 ⏱️ Duration: ${duration}s
 🖥️ System: ${SYSTEM_OS} ${SYSTEM_ARCH}
 📅 $(date '+%Y-%m-%d %H:%M:%S')
@@ -704,7 +581,7 @@ run_smart_backup() {
             
             if send_telegram_file "$backup_full_path" "$caption"; then
                 log_message "Upload successful"
-                send_telegram_message "✅ <b>Dynamic Backup Completed</b> - ${backup_filename} (${file_size})"
+                send_telegram_message "✅ <b>Ultra Robust Backup Completed</b> - ${backup_filename} (${file_size})"
                 
                 # Hapus file backup
                 rm -f "$backup_full_path"
@@ -727,23 +604,29 @@ run_smart_backup() {
     
     # Cleanup
     rm -f "$LOCK_FILE"
-    log_message "=== SMART BACKUP COMPLETED ==="
+    log_message "=== ULTRA ROBUST BACKUP COMPLETED ==="
 }
 
 # ===================================================================
-# FUNGSI SETUP DENGAN DETEKSI DINAMIS
+# FUNGSI SETUP YANG DIPERBAIKI
 # ===================================================================
 
 setup_backup() {
     clear
     echo -e "${CYAN}╔══════════════════════════════════════╗${NC}"
-    echo -e "${CYAN}║     DYNAMIC BACKUP TELEGRAM VPS     ║${NC}"
-    echo -e "${CYAN}║        Smart User Detection          ║${NC}"
+    echo -e "${CYAN}║     ULTRA ROBUST BACKUP TELEGRAM    ║${NC}"
+    echo -e "${CYAN}║        Error-Free Version            ║${NC}"
     echo -e "${CYAN}║            Version $SCRIPT_VERSION            ║${NC}"
     echo -e "${CYAN}╚══════════════════════════════════════╝${NC}"
     echo
     
-    # Deteksi users yang tersedia
+    # Hapus config lama jika ada masalah
+    if [[ -f "$CONFIG_FILE" ]]; then
+        print_warning "Removing old configuration..."
+        rm -f "$CONFIG_FILE"
+    fi
+    
+    # Deteksi users
     print_info "Detecting available users..."
     local detected_users=($(detect_vps_users))
     
@@ -756,7 +639,7 @@ setup_backup() {
     done
     echo
     
-    # Deteksi provider dan strategy
+    # Deteksi provider
     print_info "Detecting cloud provider and backup strategy..."
     local provider_info=$(detect_cloud_provider_advanced)
     local provider=$(echo "$provider_info" | cut -d'|' -f1)
@@ -767,7 +650,7 @@ setup_backup() {
     local estimated_bytes=$(calculate_estimated_size "$backup_target")
     local estimated_size=$(bytes_to_human $estimated_bytes)
     
-    print_success "Dynamic Detection Results:"
+    print_success "Ultra Robust Detection Results:"
     echo "  👤 Current User: $CURRENT_USER"
     echo "  🔑 Root Access: $IS_ROOT"
     echo "  ☁️ Cloud Provider: $provider"
@@ -794,26 +677,28 @@ setup_backup() {
     read -p "🗂️ Maximum backups to keep [default: 5]: " max_backups
     max_backups=${max_backups:-5}
     
-    # Simpan konfigurasi
+    # Simpan konfigurasi TANPA readonly variables
     cat > "$CONFIG_FILE" << EOF
-# Dynamic Backup Telegram VPS Configuration
+# Ultra Robust Backup Telegram VPS Configuration
+# Generated on $(date '+%Y-%m-%d %H:%M:%S')
+
+# Telegram Configuration
 TELEGRAM_BOT_TOKEN="$bot_token"
 TELEGRAM_CHAT_ID="$chat_id"
 BACKUP_INTERVAL="$interval"
 MAX_BACKUPS="$max_backups"
 
-# Dynamic Detection Results
+# Detection Results
 CLOUD_PROVIDER="$provider"
 BACKUP_TARGET="$backup_target"
 BACKUP_TYPE="$backup_type"
 DETECTED_USER="$(basename "$backup_target")"
 
-# System Information
+# System Information (non-readonly)
 SYSTEM_USER="$CURRENT_USER"
-IS_ROOT="$IS_ROOT"
-SYSTEM_OS="$SYSTEM_OS"
-SYSTEM_ARCH="$SYSTEM_ARCH"
-SCRIPT_VERSION="$SCRIPT_VERSION"
+USER_IS_ROOT="$IS_ROOT"
+DETECTED_OS="$SYSTEM_OS"
+DETECTED_ARCH="$SYSTEM_ARCH"
 
 # Timestamps
 CREATED_DATE="$(date '+%Y-%m-%d %H:%M:%S')"
@@ -834,7 +719,8 @@ EOF
         24) cron_schedule="0 2 * * *" ;;
     esac
     
-    crontab -l 2>/dev/null | grep -v "$SCRIPT_NAME" | crontab -
+    # Hapus crontab lama dan tambah yang baru
+    crontab -l 2>/dev/null | grep -v "$SCRIPT_NAME" | crontab - 2>/dev/null || true
     (crontab -l 2>/dev/null; echo "$cron_schedule $0 --backup >/dev/null 2>&1") | crontab -
     print_success "Crontab configured for backup every $interval hour(s)"
     
@@ -843,22 +729,23 @@ EOF
     TELEGRAM_CHAT_ID="$chat_id"
     
     if test_telegram_connection; then
-        send_telegram_message "🎉 <b>Dynamic Backup Setup Complete</b>
+        send_telegram_message "🎉 <b>Ultra Robust Backup Setup Complete</b>
 ☁️ Provider: ${provider}
 📁 Type: ${backup_type}
 📂 Path: ${backup_target}
-👤 Detected User: $(basename "$backup_target")
+👤 User: $(basename "$backup_target")
 📊 Est. Size: ${estimated_size}
 ⏰ Interval: ${interval}h
 🖥️ System: ${SYSTEM_OS} ${SYSTEM_ARCH}
-✅ Ready for automatic backups!"
+✅ Error-free and ready!"
         
         print_success "Setup completed successfully!"
         echo
-        echo -e "${GREEN}Dynamic backup system is ready!${NC}"
+        echo -e "${GREEN}Ultra robust backup system is ready!${NC}"
         echo -e "  📂 Target: ${BLUE}$backup_target${NC}"
         echo -e "  👤 User: ${BLUE}$(basename "$backup_target")${NC}"
         echo -e "  📊 Size: ${BLUE}$estimated_size${NC}"
+        echo -e "  🔧 Version: ${BLUE}$SCRIPT_VERSION${NC} (Error-free)"
         
     else
         print_error "Setup failed! Please check your Telegram configuration."
@@ -867,18 +754,17 @@ EOF
 }
 
 # ===================================================================
-# FUNGSI STATUS DAN MONITORING
+# FUNGSI STATUS
 # ===================================================================
 
 show_status() {
     clear
     echo -e "${CYAN}╔══════════════════════════════════════╗${NC}"
-    echo -e "${CYAN}║      DYNAMIC BACKUP STATUS           ║${NC}"
+    echo -e "${CYAN}║      ULTRA ROBUST BACKUP STATUS      ║${NC}"
     echo -e "${CYAN}╚══════════════════════════════════════╝${NC}"
     echo
     
-    # Deteksi real-time
-    print_info "Performing real-time detection..."
+    # Real-time detection
     local provider_info=$(detect_cloud_provider_advanced)
     local provider=$(echo "$provider_info" | cut -d'|' -f1)
     local backup_target=$(echo "$provider_info" | cut -d'|' -f2)
@@ -889,6 +775,7 @@ show_status() {
     echo "  📁 Backup Type: $backup_type"
     echo "  📂 Target Path: $backup_target"
     echo "  👤 Target User: $(basename "$backup_target")"
+    echo "  🔧 Script Version: $SCRIPT_VERSION (Ultra Robust)"
     
     if [[ -d "$backup_target" ]]; then
         local current_size=$(calculate_estimated_size "$backup_target")
@@ -900,20 +787,12 @@ show_status() {
     fi
     echo
     
-    # Available users
-    echo -e "${BLUE}Available Users:${NC}"
-    local detected_users=($(detect_vps_users))
-    for user_info in "${detected_users[@]}"; do
-        local username=$(echo "$user_info" | cut -d':' -f1)
-        local home_dir=$(echo "$user_info" | cut -d':' -f2)
-        local size=$(du -sh "$home_dir" 2>/dev/null | cut -f1 || echo "Unknown")
-        echo "  👤 $username → $home_dir ($size)"
-    done
-    echo
-    
     # Configuration status
     if [[ -f "$CONFIG_FILE" ]]; then
-        source "$CONFIG_FILE"
+        source "$CONFIG_FILE" 2>/dev/null || {
+            print_error "Configuration file corrupted!"
+            return 1
+        }
         
         echo -e "${BLUE}Configuration:${NC}"
         echo "  📋 Config File: $CONFIG_FILE"
@@ -923,12 +802,14 @@ show_status() {
         echo "  🗂️ Max Backups: $MAX_BACKUPS"
         echo "  👤 Configured User: ${DETECTED_USER:-'Auto-detect'}"
         echo "  📅 Created: $CREATED_DATE"
-        print_success "Configuration loaded"
+        print_success "Configuration loaded successfully"
         echo
         
         # Crontab status
         if crontab -l 2>/dev/null | grep -q "$SCRIPT_NAME"; then
             print_success "Automatic backups: Enabled"
+            local cron_entry=$(crontab -l 2>/dev/null | grep "$SCRIPT_NAME")
+            echo "  📋 Schedule: $cron_entry"
         else
             print_warning "Automatic backups: Disabled"
         fi
@@ -940,30 +821,24 @@ show_status() {
 
 show_help() {
     echo -e "${CYAN}╔══════════════════════════════════════╗${NC}"
-    echo -e "${CYAN}║    DYNAMIC BACKUP TELEGRAM VPS       ║${NC}"
-    echo -e "${CYAN}║        Smart User Detection          ║${NC}"
+    echo -e "${CYAN}║    ULTRA ROBUST BACKUP TELEGRAM      ║${NC}"
+    echo -e "${CYAN}║         Error-Free Version           ║${NC}"
     echo -e "${CYAN}║            Version $SCRIPT_VERSION            ║${NC}"
     echo -e "${CYAN}╚══════════════════════════════════════╝${NC}"
     echo
-    echo -e "${GREEN}Dynamic Features:${NC}"
-    echo -e "  🔍 ${BLUE}Auto-detection${NC} of VPS users (ichiazure, azureuser, ubuntu, etc.)"
-    echo -e "  ☁️ ${BLUE}Cloud provider${NC} detection with user-specific paths"
-    echo -e "  📊 ${BLUE}Smart sizing${NC} with comprehensive exclude patterns"
-    echo -e "  🛡️ ${BLUE}Fallback system${NC} for maximum reliability"
-    echo -e "  📱 ${BLUE}Rich notifications${NC} with user and provider info"
-    echo
-    echo -e "${GREEN}Supported Scenarios:${NC}"
-    echo -e "  ☁️ ${BLUE}Azure VM${NC} → Auto-detect user (ichiazure, azureuser, etc.)"
-    echo -e "  ☁️ ${BLUE}AWS EC2${NC} → Auto-detect user (ec2-user, ubuntu, etc.)"
-    echo -e "  ☁️ ${BLUE}Google Cloud${NC} → Auto-detect user (ubuntu, debian, etc.)"
-    echo -e "  ☁️ ${BLUE}DigitalOcean${NC} → Root backup"
-    echo -e "  ☁️ ${BLUE}Other VPS${NC} → Smart fallback detection"
+    echo -e "${GREEN}Ultra Robust Features:${NC}"
+    echo -e "  🛡️ ${BLUE}Error-free${NC} configuration management"
+    echo -e "  🔍 ${BLUE}Dynamic user${NC} detection (ichiazure, azureuser, etc.)"
+    echo -e "  ☁️ ${BLUE}Cloud provider${NC} auto-detection"
+    echo -e "  📊 ${BLUE}Smart sizing${NC} with comprehensive excludes"
+    echo -e "  🔄 ${BLUE}Robust retry${NC} mechanisms"
+    echo -e "  📱 ${BLUE}Rich notifications${NC} with full metadata"
     echo
     echo -e "${GREEN}Usage:${NC} $0 [OPTION]"
     echo
     echo -e "${GREEN}Options:${NC}"
-    echo -e "  ${BLUE}--setup${NC}       Setup with dynamic detection"
-    echo -e "  ${BLUE}--backup${NC}      Run smart backup"
+    echo -e "  ${BLUE}--setup${NC}       Setup with ultra robust detection"
+    echo -e "  ${BLUE}--backup${NC}      Run error-free backup"
     echo -e "  ${BLUE}--status${NC}      Show system status"
     echo -e "  ${BLUE}--test${NC}        Test Telegram connection"
     echo -e "  ${BLUE}--help${NC}        Show this help"
@@ -990,7 +865,10 @@ main() {
             ;;
         --test)
             if [[ -f "$CONFIG_FILE" ]]; then
-                source "$CONFIG_FILE"
+                source "$CONFIG_FILE" 2>/dev/null || {
+                    print_error "Configuration corrupted! Run: $0 --setup"
+                    exit 1
+                }
                 test_telegram_connection
             else
                 print_error "Configuration not found! Run: $0 --setup"
@@ -1004,11 +882,11 @@ main() {
             if [[ -f "$CONFIG_FILE" ]]; then
                 show_status
             else
-                print_info "Dynamic Backup Telegram VPS - Version $SCRIPT_VERSION"
+                print_info "Ultra Robust Backup Telegram VPS - Version $SCRIPT_VERSION"
                 echo
                 print_info "System not configured yet."
                 echo
-                read -p "Would you like to run the dynamic setup now? (y/n): " -n 1 -r
+                read -p "Would you like to run the ultra robust setup now? (y/n): " -n 1 -r
                 echo
                 if [[ $REPLY =~ ^[Yy]$ ]]; then
                     setup_backup
