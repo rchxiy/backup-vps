@@ -1,17 +1,15 @@
 #!/bin/bash
 
 # ===================================================================
-# BACKUP TELEGRAM VPS - MULTI-USER VERSION
-# Support untuk Root dan Non-Root VPS
-# Version: 2.1
+# BACKUP TELEGRAM VPS - SMART PROVIDER-BASED VERSION
+# Version: 2.2 - Provider-Specific Backup Strategy
 # ===================================================================
 
-# Konfigurasi warna untuk output
+# Konfigurasi warna
 readonly RED='\033[0;31m'
 readonly GREEN='\033[0;32m'
 readonly YELLOW='\033[1;33m'
 readonly BLUE='\033[0;34m'
-readonly PURPLE='\033[0;35m'
 readonly NC='\033[0m'
 
 # Deteksi user dan environment
@@ -42,69 +40,90 @@ print_success() { echo -e "${GREEN}[SUCCESS]${NC} $1"; }
 print_warning() { echo -e "${YELLOW}[WARNING]${NC} $1"; }
 print_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 
-# Fungsi logging dengan deteksi user
 log_message() {
     local message="$1"
     local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
-    
-    # Buat direktori log jika belum ada
     mkdir -p "$(dirname "$LOG_FILE")"
-    
-    # Rotasi log jika lebih dari 10MB
-    if [[ -f "$LOG_FILE" ]] && [[ $(stat -c%s "$LOG_FILE" 2>/dev/null || stat -f%z "$LOG_FILE" 2>/dev/null) -gt 10485760 ]]; then
-        mv "$LOG_FILE" "${LOG_FILE}.old"
-        touch "$LOG_FILE"
-    fi
-    
     echo "${timestamp} - [${CURRENT_USER}] ${message}" | tee -a "$LOG_FILE"
 }
 
-# Fungsi deteksi environment VPS
-detect_vps_environment() {
-    local vps_type="Unknown"
-    local cloud_provider="Unknown"
-    
-    # Deteksi Azure
-    if [[ -f /var/lib/waagent/Incarnation ]] || [[ -d /var/lib/waagent ]] || [[ $(curl -s -H "Metadata:true" "http://169.254.169.254/metadata/instance?api-version=2021-02-01" 2>/dev/null) ]]; then
-        cloud_provider="Microsoft Azure"
-        vps_type="Azure VM"
-    # Deteksi AWS
-    elif [[ $(curl -s http://169.254.169.254/latest/meta-data/instance-id 2>/dev/null) ]]; then
-        cloud_provider="Amazon AWS"
-        vps_type="EC2 Instance"
-    # Deteksi Google Cloud
-    elif [[ $(curl -s -H "Metadata-Flavor: Google" http://metadata.google.internal/computeMetadata/v1/instance/id 2>/dev/null) ]]; then
-        cloud_provider="Google Cloud"
-        vps_type="GCE Instance"
-    # Deteksi DigitalOcean
-    elif [[ $(curl -s http://169.254.169.254/metadata/v1/id 2>/dev/null) ]]; then
-        cloud_provider="DigitalOcean"
-        vps_type="Droplet"
-    # Deteksi Vultr
-    elif [[ -f /etc/vultr ]] || [[ $(curl -s http://169.254.169.254/v1/instanceid 2>/dev/null) ]]; then
-        cloud_provider="Vultr"
-        vps_type="Vultr Instance"
-    fi
-    
-    echo "$cloud_provider|$vps_type"
-}
+# ===================================================================
+# DETEKSI CLOUD PROVIDER DAN BACKUP STRATEGY
+# ===================================================================
 
-# Fungsi deteksi default user berdasarkan distro
-detect_default_user() {
-    if [[ -f /etc/os-release ]]; then
-        . /etc/os-release
-        case "$ID" in
-            ubuntu) echo "ubuntu" ;;
-            debian) echo "debian" ;;
-            centos|rhel) echo "centos" ;;
-            fedora) echo "fedora" ;;
-            arch) echo "arch" ;;
-            alpine) echo "alpine" ;;
-            *) echo "$CURRENT_USER" ;;
-        esac
+detect_cloud_provider_and_strategy() {
+    local provider="Unknown"
+    local backup_path=""
+    local backup_type=""
+    
+    # Deteksi Microsoft Azure
+    if [[ -f /var/lib/waagent/Incarnation ]] || [[ -d /var/lib/waagent ]] || [[ $(curl -s -H "Metadata:true" "http://169.254.169.254/metadata/instance?api-version=2021-02-01" --max-time 3 2>/dev/null) ]]; then
+        provider="Microsoft Azure"
+        # Azure: Backup /home/username (biasanya azureuser, ubuntu, dll)
+        if [[ "$IS_ROOT" == "true" ]]; then
+            # Cari default user di Azure
+            local azure_user=$(ls /home/ | head -n 1 2>/dev/null)
+            if [[ -n "$azure_user" && -d "/home/$azure_user" ]]; then
+                backup_path="/home/$azure_user"
+                backup_type="Azure User Home ($azure_user)"
+            else
+                backup_path="/home"
+                backup_type="Azure Home Directory"
+            fi
+        else
+            backup_path="$USER_HOME"
+            backup_type="Azure User Home ($CURRENT_USER)"
+        fi
+    
+    # Deteksi DigitalOcean
+    elif [[ $(curl -s http://169.254.169.254/metadata/v1/id --max-time 3 2>/dev/null) ]]; then
+        provider="DigitalOcean"
+        # DigitalOcean: Backup /root
+        backup_path="/root"
+        backup_type="DigitalOcean Root"
+    
+    # Deteksi Contabo (berdasarkan hostname atau provider info)
+    elif [[ $(hostname) == *"contabo"* ]] || [[ -f /etc/contabo ]] || [[ $(curl -s http://169.254.169.254/latest/meta-data/instance-id --max-time 3 2>/dev/null) == *"contabo"* ]]; then
+        provider="Contabo"
+        # Contabo: Backup /root
+        backup_path="/root"
+        backup_type="Contabo Root"
+    
+    # Deteksi AWS (fallback ke /home/ec2-user atau /root)
+    elif [[ $(curl -s http://169.254.169.254/latest/meta-data/instance-id --max-time 3 2>/dev/null) ]]; then
+        provider="Amazon AWS"
+        if [[ -d "/home/ec2-user" ]]; then
+            backup_path="/home/ec2-user"
+            backup_type="AWS EC2 User"
+        else
+            backup_path="/root"
+            backup_type="AWS Root"
+        fi
+    
+    # Deteksi Google Cloud
+    elif [[ $(curl -s -H "Metadata-Flavor: Google" http://metadata.google.internal/computeMetadata/v1/instance/id --max-time 3 2>/dev/null) ]]; then
+        provider="Google Cloud"
+        if [[ -d "/home/ubuntu" ]]; then
+            backup_path="/home/ubuntu"
+            backup_type="GCP Ubuntu User"
+        else
+            backup_path="/root"
+            backup_type="GCP Root"
+        fi
+    
+    # Default fallback
     else
-        echo "$CURRENT_USER"
+        provider="Generic VPS"
+        if [[ "$IS_ROOT" == "true" ]]; then
+            backup_path="/root"
+            backup_type="Generic Root"
+        else
+            backup_path="$USER_HOME"
+            backup_type="Generic User Home"
+        fi
     fi
+    
+    echo "$provider|$backup_path|$backup_type"
 }
 
 # ===================================================================
@@ -163,95 +182,11 @@ send_telegram_file() {
 }
 
 # ===================================================================
-# FUNGSI BACKUP BERDASARKAN USER TYPE
+# FUNGSI BACKUP SMART
 # ===================================================================
 
-# Backup untuk user root
-backup_as_root() {
-    local backup_path="$1"
-    
-    log_message "Backup sebagai ROOT user - Full system backup"
-    
-    zip -r "$backup_path" / \
-        -x "*/proc/*" \
-        -x "*/sys/*" \
-        -x "*/dev/*" \
-        -x "*/run/*" \
-        -x "*/mnt/*" \
-        -x "*/media/*" \
-        -x "*/tmp/*" \
-        -x "*/var/tmp/*" \
-        -x "*/var/log/*" \
-        -x "*/var/cache/*" \
-        -x "*/var/lib/docker/*" \
-        -x "*/snap/*" \
-        -x "*/node_modules/*" \
-        -x "*/__pycache__/*" \
-        -x "*/.cache/*" \
-        -x "*/.npm/*" \
-        -x "*/.git/*" \
-        -x "*/backup-*.zip" >> "$LOG_FILE" 2>&1
-}
-
-# Backup untuk user non-root
-backup_as_user() {
-    local backup_path="$1"
-    local default_user=$(detect_default_user)
-    
-    log_message "Backup sebagai USER: $CURRENT_USER (Default: $default_user)"
-    
-    # Backup home directory user saat ini
-    zip -r "$backup_path" "$USER_HOME" \
-        -x "*/node_modules/*" \
-        -x "*/__pycache__/*" \
-        -x "*/.cache/*" \
-        -x "*/.npm/*" \
-        -x "*/.yarn/*" \
-        -x "*/.local/lib/python*/*" \
-        -x "*/.local/share/virtualenvs/*" \
-        -x "*/.ipython/*" \
-        -x "*/.jupyter/*" \
-        -x "*/.ssh/*" \
-        -x "*/.gnupg/*" \
-        -x "*/.bash_history" \
-        -x "*/.zsh_history" \
-        -x "*/.DS_Store" \
-        -x "*/.git/*" \
-        -x "*/.local/share/Trash/*" \
-        -x "*/.docker/*" \
-        -x "*/.vscode-server/*" \
-        -x "*/backup-*.zip" \
-        -x "*/.backup-telegram/*" >> "$LOG_FILE" 2>&1
-    
-    # Jika user berbeda dengan default user, coba backup default user juga
-    if [[ "$CURRENT_USER" != "$default_user" ]] && [[ -d "/home/$default_user" ]]; then
-        log_message "Menambahkan backup untuk default user: $default_user"
-        zip -r "$backup_path" "/home/$default_user" \
-            -x "*/node_modules/*" \
-            -x "*/__pycache__/*" \
-            -x "*/.cache/*" \
-            -x "*/.npm/*" \
-            -x "*/.git/*" \
-            -x "*/backup-*.zip" >> "$LOG_FILE" 2>&1
-    fi
-    
-    # Backup konfigurasi sistem yang bisa diakses
-    if [[ -r /etc ]]; then
-        log_message "Menambahkan backup konfigurasi sistem"
-        zip -r "$backup_path" /etc \
-            -x "*/shadow*" \
-            -x "*/passwd*" \
-            -x "*/group*" \
-            -x "*/gshadow*" >> "$LOG_FILE" 2>&1
-    fi
-}
-
-# ===================================================================
-# FUNGSI BACKUP UTAMA
-# ===================================================================
-
-run_backup() {
-    # Buat lock file
+run_smart_backup() {
+    # Lock mechanism
     if [[ -f "$LOCK_FILE" ]]; then
         local pid=$(cat "$LOCK_FILE")
         if kill -0 "$pid" 2>/dev/null; then
@@ -269,26 +204,30 @@ run_backup() {
     
     source "$CONFIG_FILE"
     
-    # Deteksi environment
-    local env_info=$(detect_vps_environment)
-    local cloud_provider=$(echo "$env_info" | cut -d'|' -f1)
-    local vps_type=$(echo "$env_info" | cut -d'|' -f2)
+    # Deteksi provider dan strategy
+    local provider_info=$(detect_cloud_provider_and_strategy)
+    local provider=$(echo "$provider_info" | cut -d'|' -f1)
+    local backup_path=$(echo "$provider_info" | cut -d'|' -f2)
+    local backup_type=$(echo "$provider_info" | cut -d'|' -f3)
     
-    log_message "=== MEMULAI BACKUP ==="
-    log_message "User: $CURRENT_USER (Root: $IS_ROOT)"
-    log_message "Cloud Provider: $cloud_provider"
-    log_message "VPS Type: $vps_type"
+    log_message "=== SMART BACKUP DIMULAI ==="
+    log_message "Provider: $provider"
+    log_message "Backup Path: $backup_path"
+    log_message "Backup Type: $backup_type"
     
-    # Kirim notifikasi awal
-    local user_type_emoji="👤"
-    if [[ "$IS_ROOT" == "true" ]]; then
-        user_type_emoji="🔑"
+    # Validasi backup path
+    if [[ ! -d "$backup_path" ]]; then
+        log_message "ERROR: Backup path tidak ditemukan: $backup_path"
+        send_telegram_message "❌ <b>Backup gagal</b> - Path tidak ditemukan: $backup_path"
+        rm -f "$LOCK_FILE"
+        return 1
     fi
     
-    send_telegram_message "🔄 <b>Backup dimulai</b>
-${user_type_emoji} User: ${CURRENT_USER}
-☁️ Provider: ${cloud_provider}
-🖥️ Type: ${vps_type}
+    # Kirim notifikasi awal
+    send_telegram_message "🔄 <b>Smart Backup dimulai</b>
+☁️ Provider: ${provider}
+📁 Target: ${backup_type}
+📂 Path: ${backup_path}
 📅 $(date '+%Y-%m-%d %H:%M:%S')"
     
     # Buat direktori backup
@@ -299,63 +238,76 @@ ${user_type_emoji} User: ${CURRENT_USER}
     
     # Generate nama file backup
     local timestamp=$(date '+%Y%m%d_%H%M%S')
-    local user_suffix=""
-    if [[ "$IS_ROOT" != "true" ]]; then
-        user_suffix="-${CURRENT_USER}"
-    fi
-    
-    local backup_filename="backup-${ip_server}${user_suffix}-${timestamp}.zip"
-    local backup_path="${BACKUP_DIR}/${backup_filename}"
+    local provider_suffix=$(echo "$provider" | tr '[:upper:]' '[:lower:]' | tr ' ' '-')
+    local backup_filename="backup-${ip_server}-${provider_suffix}-${timestamp}.zip"
+    local backup_full_path="${BACKUP_DIR}/${backup_filename}"
     
     log_message "Membuat backup: $backup_filename"
+    log_message "Target path: $backup_path"
     
-    # Proses backup berdasarkan user type
+    # Estimasi ukuran sebelum backup
+    local estimated_size=$(du -sh "$backup_path" 2>/dev/null | cut -f1 || echo "Unknown")
+    print_info "Estimasi ukuran: $estimated_size"
+    
+    # Proses backup dengan exclude yang optimal
     local start_time=$(date +%s)
     
-    if [[ "$IS_ROOT" == "true" ]]; then
-        backup_as_root "$backup_path"
-    else
-        backup_as_user "$backup_path"
-    fi
+    log_message "Memulai kompresi..."
+    zip -r "$backup_full_path" "$backup_path" \
+        -x "*/node_modules/*" \
+        -x "*/__pycache__/*" \
+        -x "*/.cache/*" \
+        -x "*/.npm/*" \
+        -x "*/.yarn/*" \
+        -x "*/.local/lib/python*/*" \
+        -x "*/.local/share/virtualenvs/*" \
+        -x "*/.vscode-server/*" \
+        -x "*/.docker/*" \
+        -x "*/.git/*" \
+        -x "*/.ssh/*" \
+        -x "*/.gnupg/*" \
+        -x "*/.bash_history" \
+        -x "*/.zsh_history" \
+        -x "*/.mysql_history" \
+        -x "*/.DS_Store" \
+        -x "*/.local/share/Trash/*" \
+        -x "*/tmp/*" \
+        -x "*/backup-*.zip" \
+        -x "*/.backup-telegram/*" >> "$LOG_FILE" 2>&1
     
     local backup_exit_code=$?
     local end_time=$(date +%s)
     local duration=$((end_time - start_time))
     
     # Validasi hasil backup
-    if [[ $backup_exit_code -eq 0 && -f "$backup_path" ]]; then
-        local file_size=$(du -h "$backup_path" | cut -f1)
-        local file_size_bytes=$(stat -c%s "$backup_path" 2>/dev/null || stat -f%z "$backup_path" 2>/dev/null)
+    if [[ $backup_exit_code -eq 0 && -f "$backup_full_path" ]]; then
+        local file_size=$(du -h "$backup_full_path" | cut -f1)
+        local file_size_bytes=$(stat -c%s "$backup_full_path" 2>/dev/null || stat -f%z "$backup_full_path" 2>/dev/null)
         
         if [[ $file_size_bytes -lt 1024 ]]; then
             log_message "Backup terlalu kecil: $file_size"
             send_telegram_message "❌ <b>Backup gagal</b> - File terlalu kecil"
-            rm -f "$backup_path"
+            rm -f "$backup_full_path"
             rm -f "$LOCK_FILE"
             return 1
         fi
         
-        log_message "Backup berhasil: $backup_filename (Size: $file_size)"
+        log_message "Backup berhasil: $backup_filename (Size: $file_size, Duration: ${duration}s)"
         
         # Upload ke Telegram
-        local backup_type="User Backup"
-        if [[ "$IS_ROOT" == "true" ]]; then
-            backup_type="Full System Backup"
-        fi
-        
-        local caption="📦 <b>${backup_type}</b>
-${user_type_emoji} User: ${CURRENT_USER}
-☁️ ${cloud_provider}
-🖥️ ${vps_type}
+        local caption="📦 <b>Smart Backup</b>
+☁️ Provider: ${provider}
+📁 Type: ${backup_type}
+📂 Path: ${backup_path}
 📅 $(date '+%Y-%m-%d %H:%M:%S')
-📁 Size: ${file_size}
+📊 Size: ${file_size}
 ⏱️ Duration: ${duration}s
 ✅ Status: Berhasil"
         
-        if send_telegram_file "$backup_path" "$caption"; then
+        if send_telegram_file "$backup_full_path" "$caption"; then
             log_message "Upload berhasil"
-            send_telegram_message "✅ <b>Backup berhasil</b> - ${backup_filename} (${file_size})"
-            rm -f "$backup_path"
+            send_telegram_message "✅ <b>Smart Backup berhasil</b> - ${backup_filename} (${file_size})"
+            rm -f "$backup_full_path"
             log_message "File backup dihapus: $backup_filename"
         else
             log_message "Upload gagal"
@@ -369,7 +321,7 @@ ${user_type_emoji} User: ${CURRENT_USER}
     
     # Cleanup
     rm -f "$LOCK_FILE"
-    log_message "=== BACKUP SELESAI ==="
+    log_message "=== SMART BACKUP SELESAI ==="
 }
 
 # ===================================================================
@@ -379,24 +331,24 @@ ${user_type_emoji} User: ${CURRENT_USER}
 setup_backup() {
     clear
     echo -e "${BLUE}╔══════════════════════════════════════╗${NC}"
-    echo -e "${BLUE}║     SETUP BACKUP TELEGRAM VPS       ║${NC}"
-    echo -e "${BLUE}║        Multi-User Version            ║${NC}"
+    echo -e "${BLUE}║     SMART BACKUP TELEGRAM VPS       ║${NC}"
+    echo -e "${BLUE}║      Provider-Based Strategy         ║${NC}"
     echo -e "${BLUE}╚══════════════════════════════════════╝${NC}"
     echo
     
-    # Deteksi environment
-    local env_info=$(detect_vps_environment)
-    local cloud_provider=$(echo "$env_info" | cut -d'|' -f1)
-    local vps_type=$(echo "$env_info" | cut -d'|' -f2)
+    # Deteksi provider dan strategy
+    local provider_info=$(detect_cloud_provider_and_strategy)
+    local provider=$(echo "$provider_info" | cut -d'|' -f1)
+    local backup_path=$(echo "$provider_info" | cut -d'|' -f2)
+    local backup_type=$(echo "$provider_info" | cut -d'|' -f3)
     
-    print_info "Deteksi Environment:"
+    print_info "Smart Detection Results:"
     echo "  👤 Current User: $CURRENT_USER"
     echo "  🔑 Root Access: $IS_ROOT"
-    echo "  ☁️ Cloud Provider: $cloud_provider"
-    echo "  🖥️ VPS Type: $vps_type"
-    echo "  📁 Home Directory: $USER_HOME"
-    echo "  📋 Config Path: $CONFIG_FILE"
-    echo "  📝 Log Path: $LOG_FILE"
+    echo "  ☁️ Cloud Provider: $provider"
+    echo "  📁 Backup Target: $backup_type"
+    echo "  📂 Backup Path: $backup_path"
+    echo "  📊 Estimated Size: $(du -sh "$backup_path" 2>/dev/null | cut -f1 || echo "Unknown")"
     echo
     
     # Buat direktori
@@ -421,10 +373,9 @@ TELEGRAM_BOT_TOKEN="$bot_token"
 TELEGRAM_CHAT_ID="$chat_id"
 BACKUP_INTERVAL="$interval"
 MAX_BACKUPS="$max_backups"
-USER_TYPE="$CURRENT_USER"
-IS_ROOT="$IS_ROOT"
-CLOUD_PROVIDER="$cloud_provider"
-VPS_TYPE="$vps_type"
+CLOUD_PROVIDER="$provider"
+BACKUP_PATH="$backup_path"
+BACKUP_TYPE="$backup_type"
 CREATED_DATE="$(date '+%Y-%m-%d %H:%M:%S')"
 EOF
     
@@ -438,14 +389,21 @@ EOF
     TELEGRAM_BOT_TOKEN="$bot_token"
     TELEGRAM_CHAT_ID="$chat_id"
     
-    if send_telegram_message "🔧 <b>Setup Complete</b>
-${user_type_emoji} User: ${CURRENT_USER}
-☁️ ${cloud_provider} - ${vps_type}
-✅ Backup system ready!"; then
+    if send_telegram_message "🔧 <b>Smart Backup Setup</b>
+☁️ Provider: ${provider}
+📁 Target: ${backup_type}
+📂 Path: ${backup_path}
+✅ System ready!"; then
         print_success "Setup berhasil!"
     else
         print_error "Test koneksi gagal!"
     fi
+    
+    echo
+    echo -e "${GREEN}Smart backup strategy:${NC}"
+    echo -e "  ${BLUE}Azure${NC} → /home/[user] (Fast user backup)"
+    echo -e "  ${BLUE}DigitalOcean${NC} → /root (Root backup)"
+    echo -e "  ${BLUE}Contabo${NC} → /root (Root backup)"
 }
 
 # Setup crontab
@@ -478,32 +436,29 @@ setup_crontab() {
 show_status() {
     clear
     echo -e "${BLUE}╔══════════════════════════════════════╗${NC}"
-    echo -e "${BLUE}║         STATUS BACKUP SYSTEM         ║${NC}"
+    echo -e "${BLUE}║       SMART BACKUP STATUS            ║${NC}"
     echo -e "${BLUE}╚══════════════════════════════════════╝${NC}"
     echo
     
-    # Environment Info
-    local env_info=$(detect_vps_environment)
-    local cloud_provider=$(echo "$env_info" | cut -d'|' -f1)
-    local vps_type=$(echo "$env_info" | cut -d'|' -f2)
+    # Deteksi provider dan strategy
+    local provider_info=$(detect_cloud_provider_and_strategy)
+    local provider=$(echo "$provider_info" | cut -d'|' -f1)
+    local backup_path=$(echo "$provider_info" | cut -d'|' -f2)
+    local backup_type=$(echo "$provider_info" | cut -d'|' -f3)
     
-    echo -e "${BLUE}Environment Information:${NC}"
-    echo "  👤 Current User: $CURRENT_USER"
-    echo "  🔑 Root Access: $IS_ROOT"
-    echo "  ☁️ Cloud Provider: $cloud_provider"
-    echo "  🖥️ VPS Type: $vps_type"
-    echo "  🌐 IP Address: $(curl -s ifconfig.me 2>/dev/null || echo 'Unknown')"
+    echo -e "${BLUE}Smart Detection:${NC}"
+    echo "  ☁️ Provider: $provider"
+    echo "  📁 Backup Type: $backup_type"
+    echo "  📂 Target Path: $backup_path"
+    echo "  📊 Current Size: $(du -sh "$backup_path" 2>/dev/null | cut -f1 || echo "Unknown")"
     echo
     
     if [[ -f "$CONFIG_FILE" ]]; then
         source "$CONFIG_FILE"
-        
         print_success "Konfigurasi: OK"
-        echo "  📁 Config: $CONFIG_FILE"
         echo "  🤖 Bot: ${TELEGRAM_BOT_TOKEN:0:10}..."
         echo "  💬 Chat: $TELEGRAM_CHAT_ID"
         echo "  ⏰ Interval: $BACKUP_INTERVAL jam"
-        echo "  🗂️ Max Backup: $MAX_BACKUPS"
         echo
         
         # Crontab status
@@ -513,50 +468,40 @@ show_status() {
             print_warning "Crontab: Tidak aktif"
         fi
         
-        # Backup terakhir
-        if [[ -f "$LOG_FILE" ]]; then
-            local last_backup=$(tail -n 50 "$LOG_FILE" | grep "BACKUP SELESAI" | tail -n 1)
-            if [[ -n "$last_backup" ]]; then
-                local backup_time=$(echo "$last_backup" | cut -d' ' -f1-2)
-                print_success "Backup terakhir: $backup_time"
-            fi
-        fi
-        
     else
         print_error "Belum dikonfigurasi! Jalankan: $0 --setup"
     fi
+}
+
+show_help() {
+    echo -e "${BLUE}╔══════════════════════════════════════╗${NC}"
+    echo -e "${BLUE}║    SMART BACKUP TELEGRAM VPS         ║${NC}"
+    echo -e "${BLUE}║      Provider-Based Strategy         ║${NC}"
+    echo -e "${BLUE}╚══════════════════════════════════════╝${NC}"
+    echo
+    echo -e "${GREEN}Smart Backup Strategy:${NC}"
+    echo -e "  ${BLUE}Microsoft Azure${NC} → /home/[user] (User home backup)"
+    echo -e "  ${BLUE}DigitalOcean${NC} → /root (Root backup)"
+    echo -e "  ${BLUE}Contabo${NC} → /root (Root backup)"
+    echo -e "  ${BLUE}AWS${NC} → /home/ec2-user or /root"
+    echo -e "  ${BLUE}Google Cloud${NC} → /home/ubuntu or /root"
+    echo
+    echo "Usage: $0 [OPTION]"
+    echo "  --setup       Setup konfigurasi"
+    echo "  --backup      Smart backup"
+    echo "  --status      Status sistem"
+    echo "  --log         Lihat log"
+    echo "  --help        Bantuan"
 }
 
 # ===================================================================
 # MAIN SCRIPT
 # ===================================================================
 
-show_help() {
-    echo -e "${BLUE}╔══════════════════════════════════════╗${NC}"
-    echo -e "${BLUE}║    BACKUP TELEGRAM VPS MULTI-USER    ║${NC}"
-    echo -e "${BLUE}║           Version 2.1                ║${NC}"
-    echo -e "${BLUE}╚══════════════════════════════════════╝${NC}"
-    echo
-    echo "Mendukung backup untuk:"
-    echo "  🔑 Root user (full system backup)"
-    echo "  👤 Non-root user (user data backup)"
-    echo "  ☁️ Multi-cloud provider (Azure, AWS, GCP, dll)"
-    echo
-    echo "Usage: $0 [OPTION]"
-    echo
-    echo "Options:"
-    echo "  --setup       Setup konfigurasi"
-    echo "  --backup      Backup manual"
-    echo "  --status      Status sistem"
-    echo "  --log         Lihat log"
-    echo "  --help        Bantuan"
-}
-
-# Main function
 main() {
     case "${1:-}" in
         --setup) setup_backup ;;
-        --backup) run_backup ;;
+        --backup) run_smart_backup ;;
         --status) show_status ;;
         --log) 
             if [[ -f "$LOG_FILE" ]]; then
