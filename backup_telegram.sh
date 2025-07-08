@@ -1,9 +1,9 @@
 #!/bin/bash
 
 # ===================================================================
-# BACKUP TELEGRAM VPS - CLEAN LOGGING VERSION
-# ONLY: .env, .txt, .py, .js, package.json with clean output
-# Version: 4.4 - Fixed Logging & Syntax
+# BACKUP TELEGRAM VPS - PROJECT FOLDERS ONLY
+# Only backup user-created project folders, not system folders
+# Version: 5.0 - Project-Specific Backup
 # ===================================================================
 
 set -euo pipefail
@@ -17,9 +17,9 @@ readonly CYAN='\033[0;36m'
 readonly NC='\033[0m'
 
 # Konfigurasi global
-readonly SCRIPT_VERSION="4.4"
+readonly SCRIPT_VERSION="5.0"
 readonly SCRIPT_NAME="backup_telegram"
-readonly MAX_BACKUP_SIZE=1073741824  # 1GB max
+readonly MAX_BACKUP_SIZE=524288000  # 500MB max
 readonly API_TIMEOUT=30
 readonly UPLOAD_TIMEOUT=600
 readonly MAX_RETRIES=5
@@ -61,8 +61,104 @@ log_message() {
 }
 
 # ===================================================================
-# FUNGSI DETEKSI USER DAN CLOUD
+# FUNGSI DETEKSI PROJECT FOLDERS
 # ===================================================================
+
+detect_project_folders() {
+    local target_path="$1"
+    local project_folders=()
+    
+    # Cari folder yang kemungkinan adalah project (bukan sistem)
+    while IFS= read -r -d '' folder; do
+        local folder_name=$(basename "$folder")
+        
+        # Skip folder sistem
+        if [[ "$folder_name" =~ ^\. ]] || \
+           [[ "$folder_name" == "snap" ]] || \
+           [[ "$folder_name" == "tmp" ]] || \
+           [[ "$folder_name" == "cache" ]] || \
+           [[ "$folder_name" == "Downloads" ]] || \
+           [[ "$folder_name" == "Desktop" ]] || \
+           [[ "$folder_name" == "Documents" ]] || \
+           [[ "$folder_name" == "Pictures" ]] || \
+           [[ "$folder_name" == "Videos" ]] || \
+           [[ "$folder_name" == "Music" ]]; then
+            continue
+        fi
+        
+        # Cek apakah folder mengandung file project
+        local has_project_files=false
+        
+        # Cek apakah ada file .env, package.json, .py, .js di folder ini
+        if find "$folder" -maxdepth 2 \( -name "*.env" -o -name "package.json" -o -name "*.py" -o -name "*.js" \) -type f | head -1 | grep -q .; then
+            has_project_files=true
+        fi
+        
+        # Jika ada file project, tambahkan ke list
+        if [[ "$has_project_files" == "true" ]]; then
+            project_folders+=("$folder")
+        fi
+        
+    done < <(find "$target_path" -maxdepth 1 -type d ! -path "$target_path" -print0 2>/dev/null)
+    
+    printf '%s\n' "${project_folders[@]}"
+}
+
+scan_project_files() {
+    local target_path="$1"
+    local project_folders=($(detect_project_folders "$target_path"))
+    
+    local env_count=0
+    local txt_count=0
+    local py_count=0
+    local js_count=0
+    local json_count=0
+    
+    # Scan hanya di folder project
+    for folder in "${project_folders[@]}"; do
+        env_count=$((env_count + $(find "$folder" -name "*.env" -type f 2>/dev/null | wc -l)))
+        txt_count=$((txt_count + $(find "$folder" -name "*.txt" -type f 2>/dev/null | wc -l)))
+        py_count=$((py_count + $(find "$folder" -name "*.py" -type f 2>/dev/null | wc -l)))
+        js_count=$((js_count + $(find "$folder" -name "*.js" -type f 2>/dev/null | wc -l)))
+        json_count=$((json_count + $(find "$folder" -name "package.json" -type f 2>/dev/null | wc -l)))
+    done
+    
+    local total=$((env_count + txt_count + py_count + js_count + json_count))
+    
+    echo "$total|$env_count|$txt_count|$py_count|$js_count|$json_count|${#project_folders[@]}"
+}
+
+calculate_project_size() {
+    local target_path="$1"
+    local project_folders=($(detect_project_folders "$target_path"))
+    local total_size=0
+    
+    # Hitung size hanya dari folder project
+    for folder in "${project_folders[@]}"; do
+        for ext in "*.env" "*.txt" "*.py" "*.js" "package.json"; do
+            local size=$(find "$folder" -name "$ext" -type f -printf "%s\n" 2>/dev/null | awk '{sum += $1} END {print sum+0}' 2>/dev/null || echo 0)
+            total_size=$((total_size + size))
+        done
+    done
+    
+    echo $total_size
+}
+
+list_project_folders() {
+    local target_path="$1"
+    local project_folders=($(detect_project_folders "$target_path"))
+    
+    echo "📁 Project folders detected:"
+    if [[ ${#project_folders[@]} -eq 0 ]]; then
+        echo "  • No project folders found"
+    else
+        for folder in "${project_folders[@]}"; do
+            local folder_name=$(basename "$folder")
+            local file_count=$(find "$folder" \( -name "*.env" -o -name "*.txt" -o -name "*.py" -o -name "*.js" -o -name "package.json" \) -type f 2>/dev/null | wc -l)
+            echo "  • $folder_name ($file_count files)"
+        done
+    fi
+}
 
 get_primary_user() {
     local priority_users=("ichiazure" "azureuser" "ubuntu" "ec2-user" "debian")
@@ -110,86 +206,6 @@ detect_cloud_provider() {
     fi
     
     echo "$provider|$backup_path"
-}
-
-# ===================================================================
-# FUNGSI SCAN FILE DENGAN CLEAN OUTPUT
-# ===================================================================
-
-count_files_silent() {
-    local target_path="$1"
-    local pattern="$2"
-    
-    # Count files silently without any output
-    find "$target_path" -name "$pattern" \
-        ! -path "*/node_modules/*" \
-        ! -path "*/__pycache__/*" \
-        ! -path "*/.cache/*" \
-        ! -path "*/.npm/*" \
-        ! -path "*/.local/lib/python*/*" \
-        ! -path "*/.ipython/*" \
-        ! -path "*/.jupyter/*" \
-        ! -path "*/.ssh/*" \
-        ! -path "*/.local/share/jupyter/*" \
-        ! -path "*/.local/etc/jupyter/*" \
-        ! -path "*/.local/bin/*" \
-        ! -path "*/.git/*" \
-        ! -path "*/.local/share/Trash/*" \
-        ! -path "*/.local/*" \
-        ! -path "*/.rustup/*" \
-        ! -path "*/.cargo/*" \
-        ! -path "*/go/*" \
-        ! -path "*/.ipynb_checkpoints/*" \
-        2>/dev/null | wc -l
-}
-
-count_files_with_clean_output() {
-    local target_path="$1"
-    
-    # Count each file type silently
-    local env_count=$(count_files_silent "$target_path" "*.env")
-    local txt_count=$(count_files_silent "$target_path" "*.txt")
-    local py_count=$(count_files_silent "$target_path" "*.py")
-    local js_count=$(count_files_silent "$target_path" "*.js")
-    local json_count=$(count_files_silent "$target_path" "package.json")
-    
-    local total=$((env_count + txt_count + py_count + js_count + json_count))
-    
-    echo "$total|$env_count|$txt_count|$py_count|$js_count|$json_count"
-}
-
-calculate_files_size_silent() {
-    local target_path="$1"
-    local total_size=0
-    
-    # Calculate size for each file type silently
-    for ext in "*.env" "*.txt" "*.py" "*.js" "package.json"; do
-        local size=$(find "$target_path" -name "$ext" \
-            ! -path "*/node_modules/*" \
-            ! -path "*/__pycache__/*" \
-            ! -path "*/.cache/*" \
-            ! -path "*/.npm/*" \
-            ! -path "*/.local/lib/python*/*" \
-            ! -path "*/.ipython/*" \
-            ! -path "*/.jupyter/*" \
-            ! -path "*/.ssh/*" \
-            ! -path "*/.local/share/jupyter/*" \
-            ! -path "*/.local/etc/jupyter/*" \
-            ! -path "*/.local/bin/*" \
-            ! -path "*/.git/*" \
-            ! -path "*/.local/share/Trash/*" \
-            ! -path "*/.local/*" \
-            ! -path "*/.rustup/*" \
-            ! -path "*/.cargo/*" \
-            ! -path "*/go/*" \
-            ! -path "*/.ipynb_checkpoints/*" \
-            -printf "%s\n" 2>/dev/null | \
-            awk '{sum += $1} END {print sum+0}' 2>/dev/null || echo 0)
-        
-        total_size=$((total_size + size))
-    done
-    
-    echo $total_size
 }
 
 bytes_to_human() {
@@ -266,54 +282,51 @@ send_telegram_file() {
 }
 
 # ===================================================================
-# FUNGSI BACKUP ZIP
+# FUNGSI BACKUP PROJECT FOLDERS
 # ===================================================================
 
-create_zip_backup_clean() {
+create_project_backup() {
     local backup_path="$1"
     local target_path="$2"
+    local project_folders=($(detect_project_folders "$target_path"))
     
-    # Create ZIP silently with proper excludes
-    zip -r "$backup_path" "$target_path" \
-        -i '*.env' '*.txt' '*.py' '*.js' 'package.json' \
-        -x "*/node_modules/*" \
-        -x "*/__pycache__/*" \
-        -x "*/.cache/*" \
-        -x "*/.npm/*" \
-        -x "*/.local/lib/python*/*" \
-        -x "*/.ipython/*" \
-        -x "*/.jupyter/*" \
-        -x "*/.jupyter_ystore.db" \
-        -x "*/.ssh/*" \
-        -x "*/.wget-hsts" \
-        -x "*/.bash_history" \
-        -x "*/.cloud-locale-test.skip" \
-        -x "*/.DS_Store" \
-        -x "*/.local/share/jupyter/*" \
-        -x "*/.local/etc/jupyter/*" \
-        -x "*/.local/bin/jupyter*" \
-        -x "*/.local/bin/ipython*" \
-        -x "*/.local/bin/debugpy*" \
-        -x "*/.git/*" \
-        -x "*/.gitattributes" \
-        -x "*/.gitignore" \
-        -x "*/.gitmodules" \
-        -x "*/.local/share/Trash/*" \
-        -x "*/.local/*" \
-        -x "*/.rustup/*" \
-        -x "*/.cargo/*" \
-        -x "*/go/*" \
-        -x "*/.ipynb_checkpoints/*" \
-        >> "$LOG_FILE" 2>&1
+    if [[ ${#project_folders[@]} -eq 0 ]]; then
+        print_warning "No project folders found"
+        return 1
+    fi
     
-    return $?
+    print_info "Creating ZIP from ${#project_folders[@]} project folders..."
+    
+    # Buat temporary file list
+    local temp_list="/tmp/project_files_$$"
+    > "$temp_list"
+    
+    # Tambahkan file dari setiap project folder
+    for folder in "${project_folders[@]}"; do
+        find "$folder" \( -name "*.env" -o -name "*.txt" -o -name "*.py" -o -name "*.js" -o -name "package.json" \) -type f 2>/dev/null >> "$temp_list"
+    done
+    
+    local file_count=$(wc -l < "$temp_list")
+    print_info "Found $file_count project files to backup"
+    
+    if [[ $file_count -eq 0 ]]; then
+        rm -f "$temp_list"
+        return 1
+    fi
+    
+    # Buat ZIP dari file list
+    zip -@ "$backup_path" < "$temp_list" >> "$LOG_FILE" 2>&1
+    local result=$?
+    
+    rm -f "$temp_list"
+    return $result
 }
 
 # ===================================================================
 # FUNGSI BACKUP UTAMA
 # ===================================================================
 
-run_clean_zip_backup() {
+run_project_backup() {
     local start_time=$(date +%s)
     
     # Lock mechanism
@@ -335,7 +348,7 @@ run_clean_zip_backup() {
     
     source "$CONFIG_FILE"
     
-    log_message "=== CLEAN ZIP BACKUP STARTED ==="
+    log_message "=== PROJECT BACKUP STARTED ==="
     
     # Deteksi provider dan path
     local provider_info=$(detect_cloud_provider)
@@ -344,7 +357,7 @@ run_clean_zip_backup() {
     
     log_message "Provider: $provider"
     log_message "Target: $backup_target"
-    log_message "Files: .env, .txt, .py, .js, package.json with clean excludes"
+    log_message "Mode: Project folders only"
     
     # Validasi target
     if [[ ! -d "$backup_target" ]]; then
@@ -353,25 +366,25 @@ run_clean_zip_backup() {
         return 1
     fi
     
-    print_info "Scanning files with clean output..."
-    
-    # Hitung file dan size dengan output yang bersih
-    local file_info=$(count_files_with_clean_output "$backup_target")
+    # Scan project files
+    local file_info=$(scan_project_files "$backup_target")
     local total_files=$(echo "$file_info" | cut -d'|' -f1)
     local env_files=$(echo "$file_info" | cut -d'|' -f2)
     local txt_files=$(echo "$file_info" | cut -d'|' -f3)
     local py_files=$(echo "$file_info" | cut -d'|' -f4)
     local js_files=$(echo "$file_info" | cut -d'|' -f5)
     local json_files=$(echo "$file_info" | cut -d'|' -f6)
+    local project_count=$(echo "$file_info" | cut -d'|' -f7)
     
     # Estimasi size
-    local estimated_bytes=$(calculate_files_size_silent "$backup_target")
+    local estimated_bytes=$(calculate_project_size "$backup_target")
     local estimated_size=$(bytes_to_human $estimated_bytes)
     
-    log_message "Found files: .env($env_files) .txt($txt_files) .py($py_files) .js($js_files) package.json($json_files)"
-    log_message "Total: $total_files files, estimated size: $estimated_size"
+    log_message "Found $project_count project folders with $total_files files"
+    log_message "Files: .env($env_files) .txt($txt_files) .py($py_files) .js($js_files) package.json($json_files)"
+    log_message "Estimated size: $estimated_size"
     
-    # Validasi size dan file count
+    # Validasi
     if [[ $estimated_bytes -gt $MAX_BACKUP_SIZE ]]; then
         print_error "Backup size too large: $estimated_size"
         send_telegram_message "❌ <b>Backup Failed</b> - Size too large: $estimated_size"
@@ -380,27 +393,26 @@ run_clean_zip_backup() {
     fi
     
     if [[ $total_files -eq 0 ]]; then
-        print_warning "No files found to backup"
-        send_telegram_message "⚠️ <b>Backup Warning</b> - No files found (.env, .txt, .py, .js, package.json)"
+        print_warning "No project files found"
+        send_telegram_message "⚠️ <b>Backup Warning</b> - No project files found"
         rm -f "$LOCK_FILE"
         return 1
     fi
     
     # Kirim notifikasi awal
-    send_telegram_message "🔄 <b>Clean ZIP Backup Started</b>
+    send_telegram_message "🔄 <b>Project Backup Started</b>
 ☁️ Provider: ${provider}
 📂 Path: ${backup_target}
-📁 Types: .env, .txt, .py, .js, package.json
-📊 Files: ${total_files}
-📋 Breakdown: .env(${env_files}) .txt(${txt_files}) .py(${py_files}) .js(${js_files}) package.json(${json_files})
+📁 Project Folders: ${project_count}
+📊 Files: ${total_files} (.env:${env_files} .txt:${txt_files} .py:${py_files} .js:${js_files} package.json:${json_files})
 📏 Est. Size: ${estimated_size}
-🚫 Clean excludes applied
+🎯 Mode: Project folders only
 📅 $(date '+%Y-%m-%d %H:%M:%S')"
     
     # Buat direktori backup
     mkdir -p "$BACKUP_DIR"
     
-    # Generate nama file ZIP
+    # Generate nama file
     local ip_server=$(curl -s --max-time 10 ifconfig.me 2>/dev/null || echo "unknown")
     local timestamp=$(date '+%Y%m%d_%H%M%S')
     local user_suffix=""
@@ -409,14 +421,13 @@ run_clean_zip_backup() {
         user_suffix="-$(basename "$backup_target")"
     fi
     
-    local backup_filename="backup-files-${ip_server}${user_suffix}-${timestamp}.zip"
+    local backup_filename="backup-projects-${ip_server}${user_suffix}-${timestamp}.zip"
     local backup_full_path="${BACKUP_DIR}/${backup_filename}"
     
-    log_message "Creating clean ZIP backup: $backup_filename"
+    log_message "Creating project backup: $backup_filename"
     
-    # Proses backup ZIP
-    print_info "Creating ZIP archive..."
-    if create_zip_backup_clean "$backup_full_path" "$backup_target"; then
+    # Proses backup
+    if create_project_backup "$backup_full_path" "$backup_target"; then
         local end_time=$(date +%s)
         local duration=$((end_time - start_time))
         
@@ -431,24 +442,24 @@ run_clean_zip_backup() {
                 return 1
             fi
             
-            log_message "Clean ZIP backup created: $file_size (${duration}s)"
+            log_message "Project backup created: $file_size (${duration}s)"
             
             # Upload ke Telegram
-            local caption="📦 <b>Clean ZIP Backup Complete</b>
+            local caption="📦 <b>Project Backup Complete</b>
 ☁️ Provider: ${provider}
 📂 Path: ${backup_target}
-📁 Types: .env, .txt, .py, .js, package.json
+📁 Project Folders: ${project_count}
 📊 Files: ${total_files}
 📋 Breakdown: .env(${env_files}) .txt(${txt_files}) .py(${py_files}) .js(${js_files}) package.json(${json_files})
 📏 Size: ${file_size}
 ⏱️ Duration: ${duration}s
-🚫 Clean excludes: .local, .cargo, .rustup, go, node_modules
+🎯 Mode: Project folders only (no system files)
 📅 $(date '+%Y-%m-%d %H:%M:%S')
 ✅ Status: Success"
             
             if send_telegram_file "$backup_full_path" "$caption"; then
                 log_message "Upload successful"
-                send_telegram_message "✅ <b>Clean ZIP Backup Completed</b> - ${backup_filename} (${total_files} files, ${file_size})"
+                send_telegram_message "✅ <b>Project Backup Completed</b> - ${backup_filename} (${project_count} folders, ${total_files} files, ${file_size})"
                 
                 # Hapus file backup
                 rm -f "$backup_full_path"
@@ -465,23 +476,23 @@ run_clean_zip_backup() {
         
     else
         print_error "Backup creation failed"
-        send_telegram_message "❌ <b>Backup Failed</b> - ZIP creation error"
+        send_telegram_message "❌ <b>Backup Failed</b> - Creation error"
     fi
     
     # Cleanup
     rm -f "$LOCK_FILE"
-    log_message "=== CLEAN ZIP BACKUP COMPLETED ==="
+    log_message "=== PROJECT BACKUP COMPLETED ==="
 }
 
 # ===================================================================
 # FUNGSI SETUP
 # ===================================================================
 
-setup_clean_backup() {
+setup_project_backup() {
     clear
     echo -e "${CYAN}╔══════════════════════════════════════╗${NC}"
-    echo -e "${CYAN}║     CLEAN ZIP BACKUP TELEGRAM       ║${NC}"
-    echo -e "${CYAN}║  .env .txt .py .js package.json ONLY ║${NC}"
+    echo -e "${CYAN}║     PROJECT BACKUP TELEGRAM VPS     ║${NC}"
+    echo -e "${CYAN}║      User-Created Folders Only      ║${NC}"
     echo -e "${CYAN}║            Version $SCRIPT_VERSION            ║${NC}"
     echo -e "${CYAN}╚══════════════════════════════════════╝${NC}"
     echo
@@ -491,26 +502,31 @@ setup_clean_backup() {
     local provider=$(echo "$provider_info" | cut -d'|' -f1)
     local backup_target=$(echo "$provider_info" | cut -d'|' -f2)
     
-    # Scan file dengan output yang bersih
-    print_info "Scanning files with clean detection..."
-    local file_info=$(count_files_with_clean_output "$backup_target")
+    # Scan project folders
+    print_info "Detecting project folders..."
+    list_project_folders "$backup_target"
+    echo
+    
+    # Scan project files
+    local file_info=$(scan_project_files "$backup_target")
     local total_files=$(echo "$file_info" | cut -d'|' -f1)
     local env_files=$(echo "$file_info" | cut -d'|' -f2)
     local txt_files=$(echo "$file_info" | cut -d'|' -f3)
     local py_files=$(echo "$file_info" | cut -d'|' -f4)
     local js_files=$(echo "$file_info" | cut -d'|' -f5)
     local json_files=$(echo "$file_info" | cut -d'|' -f6)
+    local project_count=$(echo "$file_info" | cut -d'|' -f7)
     
     # Estimasi size
-    local estimated_bytes=$(calculate_files_size_silent "$backup_target")
+    local estimated_bytes=$(calculate_project_size "$backup_target")
     local estimated_size=$(bytes_to_human $estimated_bytes)
     
-    print_success "Clean ZIP Backup Detection Results:"
+    print_success "Project Backup Detection Results:"
     echo "  👤 Current User: $CURRENT_USER"
     echo "  ☁️ Cloud Provider: $provider"
     echo "  📂 Target Path: $backup_target"
-    echo "  📁 File Types: .env, .txt, .py, .js, package.json ONLY"
-    echo "  📊 Files Found (clean count):"
+    echo "  📁 Project Folders: $project_count"
+    echo "  📊 Project Files Found:"
     echo "    • .env files: $env_files"
     echo "    • .txt files: $txt_files"
     echo "    • .py files: $py_files"
@@ -518,14 +534,13 @@ setup_clean_backup() {
     echo "    • package.json: $json_files"
     echo "  📋 Total Files: $total_files"
     echo "  📏 Estimated Size: $estimated_size"
-    echo "  🚫 Excludes: .local, .cargo, .rustup, go, node_modules, cache"
+    echo "  🎯 Mode: Project folders only (no system folders)"
     echo "  📦 Output Format: ZIP"
-    echo "  ✨ Clean logging: No mixed output"
     echo
     
     if [[ $total_files -eq 0 ]]; then
-        print_warning "No files found matching criteria in $backup_target"
-        echo "Make sure you have .env, .txt, .py, .js, or package.json files in the target directory."
+        print_warning "No project files found in $backup_target"
+        echo "Make sure you have project folders with .env, .txt, .py, .js, or package.json files."
         return 1
     fi
     
@@ -544,7 +559,7 @@ setup_clean_backup() {
     
     # Simpan konfigurasi
     cat > "$CONFIG_FILE" << EOF
-# Clean ZIP Backup Configuration
+# Project Backup Configuration - User Folders Only
 TELEGRAM_BOT_TOKEN="$bot_token"
 TELEGRAM_CHAT_ID="$chat_id"
 BACKUP_INTERVAL="$interval"
@@ -552,6 +567,7 @@ BACKUP_INTERVAL="$interval"
 # Detection Results
 CLOUD_PROVIDER="$provider"
 BACKUP_TARGET="$backup_target"
+PROJECT_COUNT="$project_count"
 TOTAL_FILES="$total_files"
 ENV_FILES="$env_files"
 TXT_FILES="$txt_files"
@@ -586,26 +602,25 @@ EOF
     TELEGRAM_BOT_TOKEN="$bot_token"
     TELEGRAM_CHAT_ID="$chat_id"
     
-    if send_telegram_message "🎉 <b>Clean ZIP Backup Setup Complete</b>
+    if send_telegram_message "🎉 <b>Project Backup Setup Complete</b>
 ☁️ Provider: ${provider}
 📂 Path: ${backup_target}
-📁 Types: .env, .txt, .py, .js, package.json
+📁 Project Folders: ${project_count}
 📊 Files: ${total_files}
 📋 Breakdown: .env(${env_files}) .txt(${txt_files}) .py(${py_files}) .js(${js_files}) package.json(${json_files})
 📏 Size: ${estimated_size}
-🚫 Clean excludes applied
+🎯 Mode: Project folders only
 📦 Format: ZIP
-✨ Clean logging enabled!"; then
+✅ Ready for project-specific backups!"; then
         
         print_success "Setup completed successfully!"
         echo
-        echo -e "${GREEN}Clean ZIP backup system ready!${NC}"
-        echo -e "  📁 Extensions: ${BLUE}.env, .txt, .py, .js, package.json${NC}"
+        echo -e "${GREEN}Project backup system ready!${NC}"
+        echo -e "  📁 Target: ${BLUE}Project folders only${NC}"
         echo -e "  📊 Total Files: ${BLUE}$total_files${NC}"
         echo -e "  📏 Size: ${BLUE}$estimated_size${NC}"
-        echo -e "  🚫 Excludes: ${BLUE}.local, .cargo, .rustup, go, node_modules${NC}"
+        echo -e "  🎯 Mode: ${BLUE}User-created folders only${NC}"
         echo -e "  📦 Format: ${BLUE}ZIP${NC}"
-        echo -e "  ✨ Logging: ${BLUE}Clean & Fixed${NC}"
         
     else
         print_error "Setup failed! Check Telegram configuration."
@@ -615,31 +630,29 @@ EOF
 
 show_help() {
     echo -e "${CYAN}╔══════════════════════════════════════╗${NC}"
-    echo -e "${CYAN}║     CLEAN ZIP BACKUP TELEGRAM       ║${NC}"
-    echo -e "${CYAN}║   .env .txt .py .js package.json     ║${NC}"
+    echo -e "${CYAN}║     PROJECT BACKUP TELEGRAM VPS     ║${NC}"
+    echo -e "${CYAN}║      User-Created Folders Only      ║${NC}"
     echo -e "${CYAN}║            Version $SCRIPT_VERSION            ║${NC}"
     echo -e "${CYAN}╚══════════════════════════════════════╝${NC}"
     echo
-    echo -e "${GREEN}Clean Logging Features:${NC}"
-    echo -e "  ✨ ${BLUE}Fixed syntax error${NC} on line 600"
-    echo -e "  🧹 ${BLUE}Clean log output${NC} - no mixed messages"
+    echo -e "${GREEN}Project-Specific Features:${NC}"
+    echo -e "  🎯 ${BLUE}Project folders only${NC} - no system folders"
+    echo -e "  📁 ${BLUE}Smart detection${NC} - finds folders with .env, package.json, etc."
+    echo -e "  🚫 ${BLUE}Excludes system folders${NC} - .local, .cache, Downloads, etc."
     echo -e "  📦 ${BLUE}ZIP format output${NC}"
-    echo -e "  📁 ${BLUE}ONLY 5 file types${NC}: .env, .txt, .py, .js, package.json"
-    echo -e "  🚫 ${BLUE}Proper excludes${NC}: .local, .cargo, .rustup, go, node_modules"
-    echo -e "  📏 ${BLUE}Accurate counting${NC} without log interference"
-    echo -e "  🚀 ${BLUE}Fast backup${NC} - clean and efficient"
+    echo -e "  📏 ${BLUE}Small backup size${NC} - only your project files"
+    echo -e "  🚀 ${BLUE}Fast backup${NC} - no unnecessary system files"
     echo
-    echo -e "${GREEN}Fixed Issues:${NC}"
-    echo -e "  • ${GREEN}Syntax error${NC} - Fixed conditional statements"
-    echo -e "  • ${GREEN}Log mixing${NC} - Separated counting from logging"
-    echo -e "  • ${GREEN}Clean output${NC} - No [INFO] messages in counts"
-    echo -e "  • ${GREEN}Proper excludes${NC} - Comprehensive exclude patterns"
+    echo -e "${GREEN}Detection Logic:${NC}"
+    echo -e "  • ${BLUE}Includes${NC}: Folders containing .env, package.json, .py, .js files"
+    echo -e "  • ${BLUE}Excludes${NC}: Hidden folders (.*), system folders (Downloads, Desktop, etc.)"
+    echo -e "  • ${BLUE}Result${NC}: Only your actual project/work folders"
     echo
     echo -e "${GREEN}Usage:${NC} $0 [OPTION]"
     echo
     echo -e "${GREEN}Options:${NC}"
-    echo -e "  ${BLUE}--setup${NC}       Setup clean ZIP backup"
-    echo -e "  ${BLUE}--backup${NC}      Run clean ZIP backup"
+    echo -e "  ${BLUE}--setup${NC}       Setup project-specific backup"
+    echo -e "  ${BLUE}--backup${NC}      Run project backup"
     echo -e "  ${BLUE}--help${NC}        Show this help"
 }
 
@@ -649,19 +662,19 @@ show_help() {
 
 main() {
     case "${1:-}" in
-        --setup) setup_clean_backup ;;
-        --backup) run_clean_zip_backup ;;
+        --setup) setup_project_backup ;;
+        --backup) run_project_backup ;;
         --help) show_help ;;
         *)
             if [[ -f "$CONFIG_FILE" ]]; then
-                run_clean_zip_backup
+                run_project_backup
             else
-                print_info "Clean ZIP Backup Telegram VPS - Version $SCRIPT_VERSION"
+                print_info "Project Backup Telegram VPS - Version $SCRIPT_VERSION"
                 echo
-                read -p "Setup clean ZIP backup now? (y/n): " -n 1 -r
+                read -p "Setup project-specific backup now? (y/n): " -n 1 -r
                 echo
                 if [[ $REPLY =~ ^[Yy]$ ]]; then
-                    setup_clean_backup
+                    setup_project_backup
                 else
                     show_help
                 fi
