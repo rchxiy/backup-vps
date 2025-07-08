@@ -9,9 +9,10 @@ readonly BLUE='\033[0;34m'
 readonly CYAN='\033[0;36m'
 readonly NC='\033[0m'
 
-readonly SCRIPT_VERSION="6.2"
+readonly SCRIPT_VERSION="7.0"
 readonly SCRIPT_NAME="backup_telegram"
-readonly MAX_BACKUP_SIZE=314572800  # 300MB per file
+readonly MAX_BACKUP_SIZE=524288000  # 500MB
+readonly WARNING_SIZE=31457280      # 30MB warning threshold
 readonly API_TIMEOUT=30
 readonly UPLOAD_TIMEOUT=600
 readonly MAX_RETRIES=5
@@ -150,63 +151,86 @@ detect_project_folders() {
     printf '%s\n' "${project_folders[@]}"
 }
 
-count_files_in_folder() {
-    local folder="$1"
+scan_project_files() {
+    local target_path="$1"
+    local project_folders=($(detect_project_folders "$target_path"))
     
-    find "$folder" \( -name "*.env" -o -name "*.txt" -o -name "*.py" -o -name "*.js" -o -name "package.json" \) -type f \
-        ! -path "*/node_modules/*" \
-        ! -path "*/.local/*" \
-        ! -path "*/.rustup/*" \
-        ! -path "*/.cargo/*" \
-        ! -path "*/go/*" \
-        ! -path "*/.ipynb_checkpoints/*" \
-        ! -path "*/__pycache__/*" \
-        ! -path "*/.cache/*" \
-        ! -path "*/.npm/*" \
-        ! -path "*/.yarn/*" \
-        ! -path "*/.git/*" \
-        ! -path "*/dist/*" \
-        ! -path "*/build/*" \
-        ! -path "*/.next/*" \
-        ! -path "*/coverage/*" \
-        ! -path "*/logs/*" \
-        ! -path "/logs/*" \
-        ! -path "*/tmp/*" \
-        ! -path "*/temp/*" \
-        ! -path "*/public/*" \
-        ! -path "*/assets/*" \
-        ! -path "*/static/*" \
-        2>/dev/null | wc -l
+    local env_count=0
+    local txt_count=0
+    local py_count=0
+    local js_count=0
+    local json_count=0
+    
+    for folder in "${project_folders[@]}"; do
+        env_count=$((env_count + $(find "$folder" -name "*.env" -type f ! -path "*/node_modules/*" ! -path "*/.local/*" ! -path "*/.rustup/*" ! -path "*/.cargo/*" ! -path "*/go/*" ! -path "*/.ipynb_checkpoints/*" ! -path "*/__pycache__/*" ! -path "*/.cache/*" ! -path "*/.npm/*" ! -path "*/.yarn/*" ! -path "*/.git/*" ! -path "*/dist/*" ! -path "*/build/*" ! -path "*/.next/*" ! -path "*/coverage/*" ! -path "*/logs/*" ! -path "/logs/*" ! -path "*/tmp/*" ! -path "*/temp/*" 2>/dev/null | wc -l)))
+        txt_count=$((txt_count + $(find "$folder" -name "*.txt" -type f ! -path "*/node_modules/*" ! -path "*/.local/*" ! -path "*/.rustup/*" ! -path "*/.cargo/*" ! -path "*/go/*" ! -path "*/.ipynb_checkpoints/*" ! -path "*/__pycache__/*" ! -path "*/.cache/*" ! -path "*/.npm/*" ! -path "*/.yarn/*" ! -path "*/.git/*" ! -path "*/dist/*" ! -path "*/build/*" ! -path "*/.next/*" ! -path "*/coverage/*" ! -path "*/logs/*" ! -path "/logs/*" ! -path "*/tmp/*" ! -path "*/temp/*" 2>/dev/null | wc -l)))
+        py_count=$((py_count + $(find "$folder" -name "*.py" -type f ! -path "*/node_modules/*" ! -path "*/.local/*" ! -path "*/.rustup/*" ! -path "*/.cargo/*" ! -path "*/go/*" ! -path "*/.ipynb_checkpoints/*" ! -path "*/__pycache__/*" ! -path "*/.cache/*" ! -path "*/.npm/*" ! -path "*/.yarn/*" ! -path "*/.git/*" ! -path "*/dist/*" ! -path "*/build/*" ! -path "*/.next/*" ! -path "*/coverage/*" ! -path "*/logs/*" ! -path "/logs/*" ! -path "*/tmp/*" ! -path "*/temp/*" 2>/dev/null | wc -l)))
+        js_count=$((js_count + $(find "$folder" -name "*.js" -type f ! -path "*/node_modules/*" ! -path "*/.local/*" ! -path "*/.rustup/*" ! -path "*/.cargo/*" ! -path "*/go/*" ! -path "*/.ipynb_checkpoints/*" ! -path "*/__pycache__/*" ! -path "*/.cache/*" ! -path "*/.npm/*" ! -path "*/.yarn/*" ! -path "*/.git/*" ! -path "*/dist/*" ! -path "*/build/*" ! -path "*/.next/*" ! -path "*/coverage/*" ! -path "*/logs/*" ! -path "/logs/*" ! -path "*/tmp/*" ! -path "*/temp/*" 2>/dev/null | wc -l)))
+        json_count=$((json_count + $(find "$folder" -name "package.json" -type f ! -path "*/node_modules/*" ! -path "*/.local/*" ! -path "*/.rustup/*" ! -path "*/.cargo/*" ! -path "*/go/*" ! -path "*/.ipynb_checkpoints/*" ! -path "*/__pycache__/*" ! -path "*/.cache/*" ! -path "*/.npm/*" ! -path "*/.yarn/*" ! -path "*/.git/*" ! -path "*/dist/*" ! -path "*/build/*" ! -path "*/.next/*" ! -path "*/coverage/*" ! -path "*/logs/*" ! -path "/logs/*" ! -path "*/tmp/*" ! -path "*/temp/*" 2>/dev/null | wc -l)))
+    done
+    
+    local total=$((env_count + txt_count + py_count + js_count + json_count))
+    
+    echo "$total|$env_count|$txt_count|$py_count|$js_count|$json_count|${#project_folders[@]}"
 }
 
-calculate_folder_size() {
-    local folder="$1"
+calculate_project_size() {
+    local target_path="$1"
+    local project_folders=($(detect_project_folders "$target_path"))
+    local total_size=0
     
-    find "$folder" \( -name "*.env" -o -name "*.txt" -o -name "*.py" -o -name "*.js" -o -name "package.json" \) -type f \
-        ! -path "*/node_modules/*" \
-        ! -path "*/.local/*" \
-        ! -path "*/.rustup/*" \
-        ! -path "*/.cargo/*" \
-        ! -path "*/go/*" \
-        ! -path "*/.ipynb_checkpoints/*" \
-        ! -path "*/__pycache__/*" \
-        ! -path "*/.cache/*" \
-        ! -path "*/.npm/*" \
-        ! -path "*/.yarn/*" \
-        ! -path "*/.git/*" \
-        ! -path "*/dist/*" \
-        ! -path "*/build/*" \
-        ! -path "*/.next/*" \
-        ! -path "*/coverage/*" \
-        ! -path "*/logs/*" \
-        ! -path "/logs/*" \
-        ! -path "*/tmp/*" \
-        ! -path "*/temp/*" \
-        ! -path "*/public/*" \
-        ! -path "*/assets/*" \
-        ! -path "*/static/*" \
-        -printf "%s\n" 2>/dev/null | \
-        awk '{sum += $1} END {print sum+0}' 2>/dev/null || echo 0
+    for folder in "${project_folders[@]}"; do
+        for ext in "*.env" "*.txt" "*.py" "*.js" "package.json"; do
+            local size=$(find "$folder" -name "$ext" -type f ! -path "*/node_modules/*" ! -path "*/.local/*" ! -path "*/.rustup/*" ! -path "*/.cargo/*" ! -path "*/go/*" ! -path "*/.ipynb_checkpoints/*" ! -path "*/__pycache__/*" ! -path "*/.cache/*" ! -path "*/.npm/*" ! -path "*/.yarn/*" ! -path "*/.git/*" ! -path "*/dist/*" ! -path "*/build/*" ! -path "*/.next/*" ! -path "*/coverage/*" ! -path "*/logs/*" ! -path "/logs/*" ! -path "*/tmp/*" ! -path "*/temp/*" -printf "%s\n" 2>/dev/null | awk '{sum += $1} END {print sum+0}' 2>/dev/null || echo 0)
+            total_size=$((total_size + size))
+        done
+    done
+    
+    echo $total_size
+}
+
+check_large_files() {
+    local target_path="$1"
+    local large_files_report="${BACKUP_DIR}/large_files_report.txt"
+    local project_folders=($(detect_project_folders "$target_path"))
+    local has_large_files=false
+    
+    print_info "Checking for files larger than 30MB..."
+    
+    > "$large_files_report"
+    echo "=== FILES LARGER THAN 30MB ===" >> "$large_files_report"
+    echo "Generated: $(date '+%Y-%m-%d %H:%M:%S')" >> "$large_files_report"
+    echo "" >> "$large_files_report"
+    
+    for folder in "${project_folders[@]}"; do
+        local folder_name=$(basename "$folder")
+        
+        while IFS= read -r -d '' file; do
+            local file_size=$(stat -c%s "$file" 2>/dev/null || stat -f%z "$file" 2>/dev/null)
+            if [[ $file_size -gt $WARNING_SIZE ]]; then
+                local file_size_human=$(bytes_to_human $file_size)
+                local relative_path=${file#$target_path/}
+                
+                echo "📁 $folder_name: $relative_path ($file_size_human)" >> "$large_files_report"
+                print_warning "Large file found: $relative_path ($file_size_human)"
+                has_large_files=true
+            fi
+        done < <(find "$folder" \( -name "*.env" -o -name "*.txt" -o -name "*.py" -o -name "*.js" -o -name "package.json" \) -type f ! -path "*/node_modules/*" ! -path "*/.local/*" ! -path "*/.rustup/*" ! -path "*/.cargo/*" ! -path "*/go/*" ! -path "*/.ipynb_checkpoints/*" ! -path "*/__pycache__/*" ! -path "*/.cache/*" ! -path "*/.npm/*" ! -path "*/.yarn/*" ! -path "*/.git/*" ! -path "*/dist/*" ! -path "*/build/*" ! -path "*/.next/*" ! -path "*/coverage/*" ! -path "*/logs/*" ! -path "/logs/*" ! -path "*/tmp/*" ! -path "*/temp/*" -print0 2>/dev/null)
+    done
+    
+    if [[ "$has_large_files" == "true" ]]; then
+        echo "" >> "$large_files_report"
+        echo "⚠️ WARNING: These files are larger than 30MB" >> "$large_files_report"
+        echo "💾 Consider saving them manually or optimizing file sizes" >> "$large_files_report"
+        echo "📝 This report is saved at: $large_files_report" >> "$large_files_report"
+        
+        print_warning "Large files detected! Report saved: $large_files_report"
+        echo "$large_files_report"
+    else
+        echo "✅ No files larger than 30MB found" >> "$large_files_report"
+        rm -f "$large_files_report"
+        echo ""
+    fi
 }
 
 bytes_to_human() {
@@ -278,14 +302,23 @@ send_telegram_file() {
     return 1
 }
 
-create_individual_backup() {
-    local project_folder="$1"
-    local backup_path="$2"
-    local folder_name=$(basename "$project_folder")
+create_single_backup() {
+    local backup_path="$1"
+    local target_path="$2"
+    local project_folders=($(detect_project_folders "$target_path"))
     
-    print_info "Creating ZIP for project: $folder_name"
+    if [[ ${#project_folders[@]} -eq 0 ]]; then
+        return 1
+    fi
     
-    zip -r "$backup_path" "$project_folder" \
+    print_info "Creating single ZIP from ${#project_folders[@]} project folders..."
+    
+    local zip_args=()
+    for folder in "${project_folders[@]}"; do
+        zip_args+=("$folder")
+    done
+    
+    zip -r "$backup_path" "${zip_args[@]}" \
         -i '*.env' '*.txt' '*.py' '*.js' 'package.json' \
         -x "*/node_modules/*" \
         -x "*/.local/*" \
@@ -306,9 +339,6 @@ create_individual_backup() {
         -x "/logs/*" \
         -x "*/tmp/*" \
         -x "*/temp/*" \
-        -x "*/public/*" \
-        -x "*/assets/*" \
-        -x "*/static/*" \
         -x "*/.DS_Store" \
         -x "*/.gitignore" \
         >> "$LOG_FILE" 2>&1
@@ -316,11 +346,11 @@ create_individual_backup() {
     return $?
 }
 
-run_individual_backup() {
+run_single_backup() {
     local start_time=$(date +%s)
     
-    print_info "Starting individual backup process..."
-    log_message "Individual backup started"
+    print_info "Starting single ZIP backup process..."
+    log_message "Single ZIP backup started"
     
     if [[ -f "$LOCK_FILE" ]]; then
         local pid=$(cat "$LOCK_FILE" 2>/dev/null || echo "")
@@ -351,138 +381,123 @@ run_individual_backup() {
         return 1
     fi
     
-    print_info "Scanning project folders..."
-    local project_folders=($(detect_project_folders "$backup_target"))
-    local project_count=${#project_folders[@]}
+    print_info "Scanning project files..."
+    local file_info=$(scan_project_files "$backup_target")
+    local total_files=$(echo "$file_info" | cut -d'|' -f1)
+    local env_files=$(echo "$file_info" | cut -d'|' -f2)
+    local txt_files=$(echo "$file_info" | cut -d'|' -f3)
+    local py_files=$(echo "$file_info" | cut -d'|' -f4)
+    local js_files=$(echo "$file_info" | cut -d'|' -f5)
+    local json_files=$(echo "$file_info" | cut -d'|' -f6)
+    local project_count=$(echo "$file_info" | cut -d'|' -f7)
     
-    if [[ $project_count -eq 0 ]]; then
-        print_warning "No project folders found"
+    local estimated_bytes=$(calculate_project_size "$backup_target")
+    local estimated_size=$(bytes_to_human $estimated_bytes)
+    
+    log_message "Found $project_count projects, $total_files files, $estimated_size"
+    
+    if [[ $estimated_bytes -gt $MAX_BACKUP_SIZE ]]; then
+        print_error "Backup size too large: $estimated_size"
+        send_telegram_message "❌ <b>Backup Failed</b> - Size too large: $estimated_size (max: $(bytes_to_human $MAX_BACKUP_SIZE))"
         rm -f "$LOCK_FILE"
         return 1
     fi
     
-    log_message "Found $project_count project folders for individual backup"
-    
-    # Kirim notifikasi awal
-    send_telegram_message "🔄 <b>Individual Backup Started</b>
-☁️ ${provider}
-📁 ${project_count} projects
-🎯 Mode: Individual ZIP files
-⏰ $(date '+%H:%M:%S')"
+    if [[ $total_files -eq 0 ]]; then
+        print_warning "No project files found"
+        rm -f "$LOCK_FILE"
+        return 1
+    fi
     
     mkdir -p "$BACKUP_DIR"
     
+    # Check for large files and create report
+    local large_files_report=$(check_large_files "$backup_target")
+    
+    send_telegram_message "🔄 <b>Single ZIP Backup Started</b>
+☁️ ${provider}
+📁 ${project_count} projects
+📊 ${total_files} files
+📏 ${estimated_size}
+⏰ $(date '+%H:%M:%S')"
+    
     local ip_server=$(curl -s --max-time 10 ifconfig.me 2>/dev/null || echo "unknown")
     local timestamp=$(date '+%Y%m%d_%H%M%S')
+    local user_suffix=""
     
-    local successful_uploads=0
-    local failed_uploads=0
-    local total_size=0
-    local total_files=0
+    if [[ "$backup_target" != "/root" ]]; then
+        user_suffix="-$(basename "$backup_target")"
+    fi
     
-    # Loop untuk setiap project folder
-    for project_folder in "${project_folders[@]}"; do
-        local folder_name=$(basename "$project_folder")
-        local file_count=$(count_files_in_folder "$project_folder")
-        local folder_size=$(calculate_folder_size "$project_folder")
+    local backup_filename="backup-all-projects-${ip_server}${user_suffix}-${timestamp}.zip"
+    local backup_full_path="${BACKUP_DIR}/${backup_filename}"
+    
+    print_info "Creating single ZIP backup..."
+    if create_single_backup "$backup_full_path" "$backup_target"; then
+        local end_time=$(date +%s)
+        local duration=$((end_time - start_time))
         
-        if [[ $file_count -eq 0 ]]; then
-            print_warning "Skipping $folder_name (no files)"
-            continue
-        fi
-        
-        if [[ $folder_size -gt $MAX_BACKUP_SIZE ]]; then
-            print_warning "Skipping $folder_name (too large: $(bytes_to_human $folder_size))"
-            ((failed_uploads++))
-            continue
-        fi
-        
-        # Generate nama file untuk project ini
-        local backup_filename="${folder_name}-${ip_server}-${timestamp}.zip"
-        local backup_full_path="${BACKUP_DIR}/${backup_filename}"
-        
-        print_info "Processing: $folder_name ($file_count files)"
-        
-        # Buat ZIP untuk project ini
-        if create_individual_backup "$project_folder" "$backup_full_path"; then
-            if [[ -f "$backup_full_path" ]]; then
-                local file_size_bytes=$(stat -c%s "$backup_full_path" 2>/dev/null || stat -f%z "$backup_full_path" 2>/dev/null)
-                local file_size=$(bytes_to_human $file_size_bytes)
-                
-                if [[ $file_size_bytes -lt 100 ]]; then
-                    print_warning "Skipping $folder_name (file too small: $file_size)"
-                    rm -f "$backup_full_path"
-                    ((failed_uploads++))
-                    continue
-                fi
-                
-                print_success "Created: $backup_filename ($file_size)"
-                log_message "Created ZIP: $backup_filename ($file_size, $file_count files)"
-                
-                # Upload individual file ke Telegram
-                local caption="📦 <b>Project: ${folder_name}</b>
-☁️ ${provider}
-📊 ${file_count} files
-📏 ${file_size}
-⏰ $(date '+%H:%M:%S')"
-                
-                if send_telegram_file "$backup_full_path" "$caption"; then
-                    print_success "Uploaded: $folder_name"
-                    log_message "Uploaded: $backup_filename"
-                    ((successful_uploads++))
-                    total_size=$((total_size + file_size_bytes))
-                    total_files=$((total_files + file_count))
-                else
-                    print_error "Upload failed: $folder_name"
-                    log_message "Upload failed: $backup_filename"
-                    ((failed_uploads++))
-                fi
-                
-                # Hapus file setelah upload
+        if [[ -f "$backup_full_path" ]]; then
+            local file_size_bytes=$(stat -c%s "$backup_full_path" 2>/dev/null || stat -f%z "$backup_full_path" 2>/dev/null)
+            local file_size=$(bytes_to_human $file_size_bytes)
+            
+            if [[ $file_size_bytes -lt 100 ]]; then
+                print_error "Backup file too small: $file_size"
                 rm -f "$backup_full_path"
+                rm -f "$LOCK_FILE"
+                return 1
+            fi
+            
+            print_success "Single ZIP backup created: $file_size"
+            log_message "Single ZIP backup created: $backup_filename ($file_size, ${duration}s)"
+            
+            local caption="📦 <b>Single ZIP Backup Complete</b>
+☁️ ${provider}
+📁 ${project_count} projects
+📊 ${total_files} files (.env:${env_files} .txt:${txt_files} .py:${py_files} .js:${js_files} package.json:${json_files})
+📏 ${file_size}
+⏱️ ${duration}s
+⏰ $(date '+%H:%M:%S')"
+            
+            # Send large files warning if exists
+            if [[ -n "$large_files_report" && -f "$large_files_report" ]]; then
+                send_telegram_message "⚠️ <b>Large Files Warning</b>
+📄 Files larger than 30MB detected!
+💾 Consider manual backup for large files
+📝 Check the report for details"
                 
+                # Send the report file
+                send_telegram_file "$large_files_report" "📄 Large Files Report (>30MB)"
+                rm -f "$large_files_report"
+            fi
+            
+            if send_telegram_file "$backup_full_path" "$caption"; then
+                print_success "Upload completed"
+                send_telegram_message "✅ <b>Single ZIP Backup Success</b> - ${backup_filename} (${file_size})"
+                rm -f "$backup_full_path"
+                log_message "Upload completed, file cleaned up"
             else
-                print_error "Backup file not created for: $folder_name"
-                ((failed_uploads++))
+                print_error "Upload failed"
+                send_telegram_message "❌ <b>Upload Failed</b> - ${backup_filename}"
             fi
         else
-            print_error "Backup creation failed for: $folder_name"
-            ((failed_uploads++))
+            print_error "Backup file not created"
         fi
-        
-        # Small delay between uploads
-        sleep 2
-    done
-    
-    local end_time=$(date +%s)
-    local duration=$((end_time - start_time))
-    local total_size_human=$(bytes_to_human $total_size)
-    
-    # Kirim summary
-    local summary_message="✅ <b>Individual Backup Complete</b>
-☁️ ${provider}
-📊 Results:
-• ✅ Successful: ${successful_uploads}
-• ❌ Failed: ${failed_uploads}
-• 📁 Total files: ${total_files}
-• 📏 Total size: ${total_size_human}
-⏱️ Duration: ${duration}s
-⏰ Completed: $(date '+%H:%M:%S')"
-    
-    send_telegram_message "$summary_message"
-    
-    print_success "Individual backup completed!"
-    print_info "Results: $successful_uploads successful, $failed_uploads failed"
-    log_message "Individual backup completed: $successful_uploads successful, $failed_uploads failed"
+    else
+        print_error "Backup creation failed"
+        send_telegram_message "❌ <b>Backup Failed</b> - Creation error"
+    fi
     
     rm -f "$LOCK_FILE"
+    log_message "Single ZIP backup completed"
 }
 
 setup_backup() {
     clear
     echo -e "${CYAN}╔══════════════════════════════════════╗${NC}"
-    echo -e "${CYAN}║   INDIVIDUAL PROJECT BACKUP VPS     ║${NC}"
-    echo -e "${CYAN}║      One ZIP per Project v$SCRIPT_VERSION       ║${NC}"
+    echo -e "${CYAN}║     SINGLE ZIP BACKUP TELEGRAM      ║${NC}"
+    echo -e "${CYAN}║      All Projects in One ZIP        ║${NC}"
+    echo -e "${CYAN}║            Version $SCRIPT_VERSION            ║${NC}"
     echo -e "${CYAN}╚══════════════════════════════════════╝${NC}"
     echo
     
@@ -497,31 +512,39 @@ setup_backup() {
     if [[ ${#project_folders[@]} -eq 0 ]]; then
         echo "  • No project folders found"
     else
-        local total_files=0
-        local total_size=0
-        
         for folder in "${project_folders[@]}"; do
             local folder_name=$(basename "$folder")
-            local file_count=$(count_files_in_folder "$folder")
-            local folder_size=$(calculate_folder_size "$folder")
-            local size_human=$(bytes_to_human $folder_size)
-            
-            echo "  • $folder_name ($file_count files, $size_human)"
-            total_files=$((total_files + file_count))
-            total_size=$((total_size + folder_size))
+            echo "  • $folder_name"
         done
-        
-        echo
-        print_success "Summary:"
-        echo "  📁 Projects: ${#project_folders[@]}"
-        echo "  📊 Total files: $total_files"
-        echo "  📏 Total size: $(bytes_to_human $total_size)"
-        echo "  🎯 Mode: Individual ZIP per project"
     fi
     echo
     
-    if [[ ${#project_folders[@]} -eq 0 ]]; then
-        print_warning "No project folders found"
+    local file_info=$(scan_project_files "$backup_target")
+    local total_files=$(echo "$file_info" | cut -d'|' -f1)
+    local env_files=$(echo "$file_info" | cut -d'|' -f2)
+    local txt_files=$(echo "$file_info" | cut -d'|' -f3)
+    local py_files=$(echo "$file_info" | cut -d'|' -f4)
+    local js_files=$(echo "$file_info" | cut -d'|' -f5)
+    local json_files=$(echo "$file_info" | cut -d'|' -f6)
+    local project_count=$(echo "$file_info" | cut -d'|' -f7)
+    
+    local estimated_bytes=$(calculate_project_size "$backup_target")
+    local estimated_size=$(bytes_to_human $estimated_bytes)
+    
+    print_success "Single ZIP Backup Detection:"
+    echo "  👤 Current User: $CURRENT_USER"
+    echo "  ☁️ Cloud Provider: $provider"
+    echo "  📂 Target Path: $backup_target"
+    echo "  📁 Project Folders: $project_count"
+    echo "  📊 Files: $total_files (.env:$env_files .txt:$txt_files .py:$py_files .js:$js_files package.json:$json_files)"
+    echo "  📏 Estimated Size: $estimated_size"
+    echo "  📦 Max Size: $(bytes_to_human $MAX_BACKUP_SIZE)"
+    echo "  ⚠️ Warning Threshold: 30MB per file"
+    echo "  🎯 Mode: Single ZIP for all projects"
+    echo
+    
+    if [[ $total_files -eq 0 ]]; then
+        print_warning "No project files found"
         return 1
     fi
     
@@ -541,7 +564,14 @@ BACKUP_INTERVAL="$interval"
 
 CLOUD_PROVIDER="$provider"
 BACKUP_TARGET="$backup_target"
-PROJECT_COUNT="${#project_folders[@]}"
+PROJECT_COUNT="$project_count"
+TOTAL_FILES="$total_files"
+ENV_FILES="$env_files"
+TXT_FILES="$txt_files"
+PY_FILES="$py_files"
+JS_FILES="$js_files"
+JSON_FILES="$json_files"
+ESTIMATED_SIZE="$estimated_size"
 
 CREATED_DATE="$(date '+%Y-%m-%d %H:%M:%S')"
 EOF
@@ -566,17 +596,22 @@ EOF
     TELEGRAM_BOT_TOKEN="$bot_token"
     TELEGRAM_CHAT_ID="$chat_id"
     
-    if send_telegram_message "🎉 <b>Individual Backup Setup</b>
+    if send_telegram_message "🎉 <b>Single ZIP Backup Setup</b>
 ☁️ ${provider}
-📁 ${#project_folders[@]} projects
-🎯 Mode: Individual ZIP files
+📁 ${project_count} projects
+📊 ${total_files} files
+📏 ${estimated_size}
+⚠️ 30MB warning enabled
+🎯 Mode: Single ZIP
 ⏰ Every ${interval}h"; then
         print_success "Setup completed successfully!"
         echo
-        echo -e "${GREEN}System ready for individual backups!${NC}"
-        echo -e "  📁 Projects: ${#project_folders[@]}"
-        echo -e "  🎯 Mode: One ZIP per project"
-        echo -e "  📤 Upload: Individual files"
+        echo -e "${GREEN}Single ZIP backup system ready!${NC}"
+        echo -e "  📁 Projects: $project_count"
+        echo -e "  📊 Files: $total_files"
+        echo -e "  📏 Size: $estimated_size"
+        echo -e "  🎯 Mode: Single ZIP for all projects"
+        echo -e "  ⚠️ Warning: Files >30MB will be reported"
     else
         print_error "Setup failed - check Telegram configuration"
         return 1
@@ -585,43 +620,44 @@ EOF
 
 show_help() {
     echo -e "${CYAN}╔══════════════════════════════════════╗${NC}"
-    echo -e "${CYAN}║   INDIVIDUAL PROJECT BACKUP VPS     ║${NC}"
-    echo -e "${CYAN}║      One ZIP per Project v$SCRIPT_VERSION       ║${NC}"
+    echo -e "${CYAN}║     SINGLE ZIP BACKUP TELEGRAM      ║${NC}"
+    echo -e "${CYAN}║      All Projects in One ZIP        ║${NC}"
+    echo -e "${CYAN}║            Version $SCRIPT_VERSION            ║${NC}"
     echo -e "${CYAN}╚══════════════════════════════════════╝${NC}"
     echo
     echo -e "${GREEN}Features:${NC}"
-    echo -e "  📁 Individual ZIP per project"
-    echo -e "  📤 Upload one by one to Telegram"
+    echo -e "  📦 Single ZIP containing all projects"
+    echo -e "  ⚠️ 30MB file size warning system"
+    echo -e "  📄 Large files report generation"
     echo -e "  🚫 Comprehensive excludes"
-    echo -e "  📱 Clean progress messages"
-    echo -e "  📝 Simple logging"
+    echo -e "  📱 Clean Telegram notifications"
     echo
-    echo -e "${GREEN}How it works:${NC}"
-    echo -e "  1. Scan project folders"
-    echo -e "  2. Create individual ZIP for each project"
-    echo -e "  3. Upload each ZIP separately to Telegram"
-    echo -e "  4. Clean up temporary files"
+    echo -e "${GREEN}Large Files Warning:${NC}"
+    echo -e "  • Scans for files >30MB before backup"
+    echo -e "  • Generates report with file locations"
+    echo -e "  • Sends warning message to Telegram"
+    echo -e "  • Suggests manual backup for large files"
     echo
     echo -e "${GREEN}Usage:${NC} $0 [OPTION]"
     echo
     echo -e "${GREEN}Options:${NC}"
-    echo -e "  --setup       Setup individual backup system"
-    echo -e "  --backup      Run individual backup"
+    echo -e "  --setup       Setup single ZIP backup"
+    echo -e "  --backup      Run single ZIP backup"
     echo -e "  --help        Show help"
 }
 
 main() {
     case "${1:-}" in
         --setup) setup_backup ;;
-        --backup) run_individual_backup ;;
+        --backup) run_single_backup ;;
         --help) show_help ;;
         *)
             if [[ -f "$CONFIG_FILE" ]]; then
-                run_individual_backup
+                run_single_backup
             else
-                print_info "Individual Project Backup v$SCRIPT_VERSION"
+                print_info "Single ZIP Backup Telegram v$SCRIPT_VERSION"
                 echo
-                read -p "Setup individual backup system now? (y/n): " -n 1 -r
+                read -p "Setup single ZIP backup system now? (y/n): " -n 1 -r
                 echo
                 if [[ $REPLY =~ ^[Yy]$ ]]; then
                     setup_backup
