@@ -19,7 +19,7 @@ readonly NC='\033[0m'
 # Konfigurasi global
 readonly SCRIPT_VERSION="5.2"
 readonly SCRIPT_NAME="backup_telegram"
-readonly MAX_BACKUP_SIZE=52428800  # 50MB max (after compression)
+readonly MAX_BACKUP_SIZE=104857600
 readonly API_TIMEOUT=30
 readonly UPLOAD_TIMEOUT=600
 readonly MAX_RETRIES=5
