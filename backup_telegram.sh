@@ -100,6 +100,7 @@ detect_project_folders() {
             ! -path "*/__pycache__/*" \
             ! -path "*/.cache/*" \
             ! -path "*/.git/*" \
+            ! -path "*/logs/*" \
             -type f | head -1 | grep -q .; then
             has_project_files=true
         fi
@@ -134,6 +135,7 @@ count_files_with_excludes() {
         ! -path "*/build/*" \
         ! -path "*/.next/*" \
         ! -path "*/coverage/*" \
+        ! -path "*/logs/*" \
         2>/dev/null | wc -l
 }
 
@@ -184,6 +186,7 @@ calculate_project_size_with_excludes() {
                 ! -path "*/build/*" \
                 ! -path "*/.next/*" \
                 ! -path "*/coverage/*" \
+                ! -path "*/logs/*" \
                 -printf "%s\n" 2>/dev/null | \
                 awk '{sum += $1} END {print sum+0}' 2>/dev/null || echo 0)
             total_size=$((total_size + size))
@@ -383,6 +386,7 @@ create_project_backup_with_excludes() {
         -x "*/.DS_Store" \
         -x "*/.gitignore" \
         -x "*/.gitattributes" \
+        -x "*/logs" \
         >> "$LOG_FILE" 2>&1
     
     return $?
