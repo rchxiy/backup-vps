@@ -1,14 +1,7 @@
 #!/bin/bash
 
-# ===================================================================
-# BACKUP TELEGRAM VPS - MAXIMUM COMPRESSION VERSION
-# Ultra-compressed backup with comprehensive excludes
-# Version: 5.2 - Maximum Compression & Logs Exclude
-# ===================================================================
-
 set -euo pipefail
 
-# Konfigurasi warna
 readonly RED='\033[0;31m'
 readonly GREEN='\033[0;32m'
 readonly YELLOW='\033[1;33m'
@@ -16,15 +9,13 @@ readonly BLUE='\033[0;34m'
 readonly CYAN='\033[0;36m'
 readonly NC='\033[0m'
 
-# Konfigurasi global
-readonly SCRIPT_VERSION="5.2"
+readonly SCRIPT_VERSION="5.3"
 readonly SCRIPT_NAME="backup_telegram"
 readonly MAX_BACKUP_SIZE=104857600
 readonly API_TIMEOUT=30
 readonly UPLOAD_TIMEOUT=600
 readonly MAX_RETRIES=5
 
-# Deteksi environment
 CURRENT_USER=$(whoami)
 USER_HOME=$(eval echo ~$CURRENT_USER)
 IS_ROOT=false
@@ -44,10 +35,6 @@ fi
 
 readonly CONFIG_FILE="${SCRIPT_DIR}/config.conf"
 
-# ===================================================================
-# FUNGSI UTILITY
-# ===================================================================
-
 print_info() { echo -e "${BLUE}[INFO]${NC} $1"; }
 print_success() { echo -e "${GREEN}[SUCCESS]${NC} $1"; }
 print_warning() { echo -e "${YELLOW}[WARNING]${NC} $1"; }
@@ -60,9 +47,47 @@ log_message() {
     echo "${timestamp} - [${CURRENT_USER}] ${message}" | tee -a "$LOG_FILE"
 }
 
-# ===================================================================
-# FUNGSI DETEKSI PROJECT DENGAN EXCLUDE MAKSIMAL
-# ===================================================================
+get_primary_user() {
+    local priority_users=("ichiazure" "azureuser" "ubuntu" "ec2-user" "debian")
+    for user in "${priority_users[@]}"; do
+        if [[ -d "/home/$user" ]]; then
+            echo "$user:/home/$user"
+            return
+        fi
+    done
+    echo "root:/root"
+}
+
+detect_cloud_provider() {
+    local provider="Unknown"
+    local backup_path=""
+    
+    if [[ -f /var/lib/waagent/Incarnation ]] || [[ -d /var/lib/waagent ]]; then
+        provider="Microsoft Azure"
+        if [[ "$IS_ROOT" == "true" ]]; then
+            local user_info=$(get_primary_user)
+            backup_path=$(echo "$user_info" | cut -d':' -f2)
+        else
+            backup_path="$USER_HOME"
+        fi
+    elif curl -s http://169.254.169.254/latest/meta-data/instance-id --max-time 3 &>/dev/null; then
+        provider="Amazon AWS"
+        local user_info=$(get_primary_user)
+        backup_path=$(echo "$user_info" | cut -d':' -f2)
+    elif curl -s http://169.254.169.254/metadata/v1/id --max-time 3 &>/dev/null; then
+        provider="DigitalOcean"
+        backup_path="/root"
+    else
+        provider="Generic VPS"
+        backup_path="/root"
+    fi
+    
+    if [[ ! -d "$backup_path" ]]; then
+        backup_path="/root"
+    fi
+    
+    echo "$provider|$backup_path"
+}
 
 detect_project_folders() {
     local target_path="$1"
@@ -71,7 +96,6 @@ detect_project_folders() {
     while IFS= read -r -d '' folder; do
         local folder_name=$(basename "$folder")
         
-        # Skip folder sistem dan logs
         if [[ "$folder_name" =~ ^\. ]] || \
            [[ "$folder_name" == "snap" ]] || \
            [[ "$folder_name" == "tmp" ]] || \
@@ -87,9 +111,7 @@ detect_project_folders() {
             continue
         fi
         
-        # Cek apakah folder mengandung file project (dengan exclude maksimal)
         local has_project_files=false
-        
         if find "$folder" -maxdepth 3 \( -name "*.env" -o -name "package.json" -o -name "*.py" -o -name "*.js" \) \
             ! -path "*/node_modules/*" \
             ! -path "*/.local/*" \
@@ -117,7 +139,6 @@ detect_project_folders() {
     printf '%s\n' "${project_folders[@]}"
 }
 
-# Fungsi count files dengan exclude maksimal
 count_files_with_max_excludes() {
     local folder="$1"
     local pattern="$2"
@@ -147,6 +168,13 @@ count_files_with_max_excludes() {
         ! -path "*/public/uploads/*" \
         ! -path "*/storage/logs/*" \
         ! -path "*/var/log/*" \
+        ! -path "*/test/*" \
+        ! -path "*/tests/*" \
+        ! -path "*/docs/*" \
+        ! -path "*/documentation/*" \
+        ! -path "*/examples/*" \
+        ! -path "*/demo/*" \
+        ! -path "*/sample/*" \
         2>/dev/null | wc -l
 }
 
@@ -169,7 +197,6 @@ scan_project_files_max_excludes() {
     done
     
     local total=$((env_count + txt_count + py_count + js_count + json_count))
-    
     echo "$total|$env_count|$txt_count|$py_count|$js_count|$json_count|${#project_folders[@]}"
 }
 
@@ -205,6 +232,13 @@ calculate_project_size_max_excludes() {
                 ! -path "*/public/uploads/*" \
                 ! -path "*/storage/logs/*" \
                 ! -path "*/var/log/*" \
+                ! -path "*/test/*" \
+                ! -path "*/tests/*" \
+                ! -path "*/docs/*" \
+                ! -path "*/documentation/*" \
+                ! -path "*/examples/*" \
+                ! -path "*/demo/*" \
+                ! -path "*/sample/*" \
                 -printf "%s\n" 2>/dev/null | \
                 awk '{sum += $1} END {print sum+0}' 2>/dev/null || echo 0)
             total_size=$((total_size + size))
@@ -218,71 +252,24 @@ list_project_folders_max_excludes() {
     local target_path="$1"
     local project_folders=($(detect_project_folders "$target_path"))
     
-    echo "📁 Project folders detected (maximum excludes applied):"
+    echo "📁 Project folders detected:"
     if [[ ${#project_folders[@]} -eq 0 ]]; then
         echo "  • No project folders found"
     else
         for folder in "${project_folders[@]}"; do
             local folder_name=$(basename "$folder")
-            
             local file_count=0
             for ext in "*.env" "*.txt" "*.py" "*.js" "package.json"; do
                 local count=$(count_files_with_max_excludes "$folder" "$ext")
                 file_count=$((file_count + count))
             done
-            
-            echo "  • $folder_name ($file_count files - max excludes)"
+            echo "  • $folder_name ($file_count files)"
         done
     fi
 }
 
-get_primary_user() {
-    local priority_users=("ichiazure" "azureuser" "ubuntu" "ec2-user" "debian")
-    
-    for user in "${priority_users[@]}"; do
-        if [[ -d "/home/$user" ]]; then
-            echo "$user:/home/$user"
-            return
-        fi
-    done
-    
-    echo "root:/root"
-}
-
-detect_cloud_provider() {
-    local provider="Unknown"
-    local backup_path=""
-    
-    if [[ -f /var/lib/waagent/Incarnation ]] || [[ -d /var/lib/waagent ]]; then
-        provider="Microsoft Azure"
-        if [[ "$IS_ROOT" == "true" ]]; then
-            local user_info=$(get_primary_user)
-            backup_path=$(echo "$user_info" | cut -d':' -f2)
-        else
-            backup_path="$USER_HOME"
-        fi
-    elif curl -s http://169.254.169.254/latest/meta-data/instance-id --max-time 3 &>/dev/null; then
-        provider="Amazon AWS"
-        local user_info=$(get_primary_user)
-        backup_path=$(echo "$user_info" | cut -d':' -f2)
-    elif curl -s http://169.254.169.254/metadata/v1/id --max-time 3 &>/dev/null; then
-        provider="DigitalOcean"
-        backup_path="/root"
-    else
-        provider="Generic VPS"
-        backup_path="/root"
-    fi
-    
-    if [[ ! -d "$backup_path" ]]; then
-        backup_path="/root"
-    fi
-    
-    echo "$provider|$backup_path"
-}
-
 bytes_to_human() {
     local bytes=$1
-    
     if [[ $bytes -gt 1073741824 ]]; then
         echo "$(( bytes / 1073741824 ))GB"
     elif [[ $bytes -gt 1048576 ]]; then
@@ -293,10 +280,6 @@ bytes_to_human() {
         echo "${bytes}B"
     fi
 }
-
-# ===================================================================
-# FUNGSI TELEGRAM API
-# ===================================================================
 
 send_telegram_message() {
     local message="$1"
@@ -316,7 +299,6 @@ send_telegram_message() {
         ((retry_count++))
         sleep 2
     done
-    
     return 1
 }
 
@@ -349,13 +331,8 @@ send_telegram_file() {
         ((retry_count++))
         sleep 5
     done
-    
     return 1
 }
-
-# ===================================================================
-# FUNGSI BACKUP DENGAN MAXIMUM COMPRESSION
-# ===================================================================
 
 create_max_compressed_backup() {
     local backup_path="$1"
@@ -367,14 +344,13 @@ create_max_compressed_backup() {
         return 1
     fi
     
-    print_info "Creating MAXIMUM COMPRESSED ZIP from ${#project_folders[@]} project folders..."
+    print_info "Creating maximum compressed ZIP from ${#project_folders[@]} project folders..."
     
     local zip_args=()
     for folder in "${project_folders[@]}"; do
         zip_args+=("$folder")
     done
     
-    # ZIP dengan MAXIMUM COMPRESSION (-9) dan exclude maksimal
     zip -9 -r "$backup_path" "${zip_args[@]}" \
         -i '*.env' '*.txt' '*.py' '*.js' 'package.json' \
         -x "*/node_modules/*" \
@@ -402,26 +378,31 @@ create_max_compressed_backup() {
         -x "*/public/uploads/*" \
         -x "*/storage/logs/*" \
         -x "*/var/log/*" \
+        -x "*/test/*" \
+        -x "*/tests/*" \
+        -x "*/docs/*" \
+        -x "*/documentation/*" \
+        -x "*/examples/*" \
+        -x "*/demo/*" \
+        -x "*/sample/*" \
         -x "*/.DS_Store" \
         -x "*/.gitignore" \
         -x "*/.gitattributes" \
         -x "*/README.md" \
         -x "*/LICENSE" \
         -x "*/*.log" \
+        -x "*/*.tmp" \
+        -x "*/*.bak" \
+        -x "*/*.old" \
         -x "*/*.lock" \
         >> "$LOG_FILE" 2>&1
     
     return $?
 }
 
-# ===================================================================
-# FUNGSI BACKUP UTAMA
-# ===================================================================
-
 run_max_compressed_backup() {
     local start_time=$(date +%s)
     
-    # Lock mechanism
     if [[ -f "$LOCK_FILE" ]]; then
         local pid=$(cat "$LOCK_FILE" 2>/dev/null || echo "")
         if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
@@ -431,7 +412,6 @@ run_max_compressed_backup() {
     fi
     echo $$ > "$LOCK_FILE"
     
-    # Load konfigurasi
     if [[ ! -f "$CONFIG_FILE" ]]; then
         print_error "Configuration not found! Run: $0 --setup"
         rm -f "$LOCK_FILE"
@@ -439,10 +419,8 @@ run_max_compressed_backup() {
     fi
     
     source "$CONFIG_FILE"
-    
     log_message "=== MAXIMUM COMPRESSED BACKUP STARTED ==="
     
-    # Deteksi provider dan path
     local provider_info=$(detect_cloud_provider)
     local provider=$(echo "$provider_info" | cut -d'|' -f1)
     local backup_target=$(echo "$provider_info" | cut -d'|' -f2)
@@ -451,14 +429,12 @@ run_max_compressed_backup() {
     log_message "Target: $backup_target"
     log_message "Mode: Maximum compression with comprehensive excludes"
     
-    # Validasi target
     if [[ ! -d "$backup_target" ]]; then
         print_error "Target directory not found: $backup_target"
         rm -f "$LOCK_FILE"
         return 1
     fi
     
-    # Scan project files dengan exclude maksimal
     local file_info=$(scan_project_files_max_excludes "$backup_target")
     local total_files=$(echo "$file_info" | cut -d'|' -f1)
     local env_files=$(echo "$file_info" | cut -d'|' -f2)
@@ -468,12 +444,10 @@ run_max_compressed_backup() {
     local json_files=$(echo "$file_info" | cut -d'|' -f6)
     local project_count=$(echo "$file_info" | cut -d'|' -f7)
     
-    # Estimasi size sebelum compression
     local estimated_bytes=$(calculate_project_size_max_excludes "$backup_target")
     local estimated_size=$(bytes_to_human $estimated_bytes)
     
-    # Estimasi size setelah maximum compression (70-85% reduction)
-    local compressed_bytes=$((estimated_bytes * 20 / 100))  # Assume 80% compression
+    local compressed_bytes=$((estimated_bytes * 20 / 100))
     local compressed_size=$(bytes_to_human $compressed_bytes)
     
     log_message "Found $project_count project folders with maximum excludes"
@@ -482,7 +456,6 @@ run_max_compressed_backup() {
     log_message "Estimated size before compression: $estimated_size"
     log_message "Estimated size after max compression: $compressed_size"
     
-    # Validasi
     if [[ $compressed_bytes -gt $MAX_BACKUP_SIZE ]]; then
         print_error "Estimated compressed size too large: $compressed_size (max: $(bytes_to_human $MAX_BACKUP_SIZE))"
         send_telegram_message "❌ <b>Backup Failed</b> - Estimated compressed size too large: $compressed_size"
@@ -497,7 +470,6 @@ run_max_compressed_backup() {
         return 1
     fi
     
-    # Kirim notifikasi awal
     send_telegram_message "🔄 <b>Maximum Compressed Backup Started</b>
 ☁️ Provider: ${provider}
 📂 Path: ${backup_target}
@@ -509,10 +481,8 @@ run_max_compressed_backup() {
 ⚡ Compression: Maximum (-9)
 📅 $(date '+%Y-%m-%d %H:%M:%S')"
     
-    # Buat direktori backup
     mkdir -p "$BACKUP_DIR"
     
-    # Generate nama file
     local ip_server=$(curl -s --max-time 10 ifconfig.me 2>/dev/null || echo "unknown")
     local timestamp=$(date '+%Y%m%d_%H%M%S')
     local user_suffix=""
@@ -526,7 +496,6 @@ run_max_compressed_backup() {
     
     log_message "Creating maximum compressed backup: $backup_filename"
     
-    # Proses backup dengan maximum compression
     if create_max_compressed_backup "$backup_full_path" "$backup_target"; then
         local end_time=$(date +%s)
         local duration=$((end_time - start_time))
@@ -535,7 +504,6 @@ run_max_compressed_backup() {
             local file_size_bytes=$(stat -c%s "$backup_full_path" 2>/dev/null || stat -f%z "$backup_full_path" 2>/dev/null)
             local file_size=$(bytes_to_human $file_size_bytes)
             
-            # Hitung compression ratio
             local compression_ratio=0
             if [[ $estimated_bytes -gt 0 ]]; then
                 compression_ratio=$(( (estimated_bytes - file_size_bytes) * 100 / estimated_bytes ))
@@ -550,7 +518,6 @@ run_max_compressed_backup() {
             
             log_message "Maximum compressed backup created: $file_size (${duration}s, ${compression_ratio}% compression)"
             
-            # Upload ke Telegram
             local caption="📦 <b>Maximum Compressed Backup Complete</b>
 ☁️ Provider: ${provider}
 📂 Path: ${backup_target}
@@ -572,7 +539,6 @@ run_max_compressed_backup() {
 📊 ${total_files} files from ${project_count} folders
 📏 ${estimated_size} → ${file_size} (${compression_ratio}% compression)"
                 
-                # Hapus file backup
                 rm -f "$backup_full_path"
                 log_message "Backup file removed: $backup_filename"
                 
@@ -590,14 +556,9 @@ run_max_compressed_backup() {
         send_telegram_message "❌ <b>Backup Failed</b> - Creation error"
     fi
     
-    # Cleanup
     rm -f "$LOCK_FILE"
     log_message "=== MAXIMUM COMPRESSED BACKUP COMPLETED ==="
 }
-
-# ===================================================================
-# FUNGSI SETUP
-# ===================================================================
 
 setup_max_compressed_backup() {
     clear
@@ -608,17 +569,14 @@ setup_max_compressed_backup() {
     echo -e "${CYAN}╚══════════════════════════════════════╝${NC}"
     echo
     
-    # Deteksi provider dan path
     local provider_info=$(detect_cloud_provider)
     local provider=$(echo "$provider_info" | cut -d'|' -f1)
     local backup_target=$(echo "$provider_info" | cut -d'|' -f2)
     
-    # Scan project folders dengan exclude maksimal
     print_info "Detecting project folders with maximum excludes..."
     list_project_folders_max_excludes "$backup_target"
     echo
     
-    # Scan project files dengan exclude maksimal
     local file_info=$(scan_project_files_max_excludes "$backup_target")
     local total_files=$(echo "$file_info" | cut -d'|' -f1)
     local env_files=$(echo "$file_info" | cut -d'|' -f2)
@@ -628,11 +586,9 @@ setup_max_compressed_backup() {
     local json_files=$(echo "$file_info" | cut -d'|' -f6)
     local project_count=$(echo "$file_info" | cut -d'|' -f7)
     
-    # Estimasi size
     local estimated_bytes=$(calculate_project_size_max_excludes "$backup_target")
     local estimated_size=$(bytes_to_human $estimated_bytes)
     
-    # Estimasi setelah maximum compression
     local compressed_bytes=$((estimated_bytes * 20 / 100))
     local compressed_size=$(bytes_to_human $compressed_bytes)
     
@@ -650,6 +606,7 @@ setup_max_compressed_backup() {
     echo "  📋 Total Files: $total_files"
     echo "  📏 Original Size: $estimated_size"
     echo "  🗜️ Estimated Compressed: $compressed_size (80% reduction)"
+    echo "  📦 Max Size: $(bytes_to_human $MAX_BACKUP_SIZE)"
     echo "  🚫 Maximum Excludes: node_modules, logs, cache, build, temp, .git"
     echo "  ⚡ Compression Level: Maximum (-9)"
     echo "  📦 Output Format: ZIP"
@@ -661,11 +618,9 @@ setup_max_compressed_backup() {
         return 1
     fi
     
-    # Buat direktori
     mkdir -p "$SCRIPT_DIR"
     mkdir -p "$BACKUP_DIR"
     
-    # Input konfigurasi
     echo -e "${YELLOW}Telegram Bot Configuration:${NC}"
     echo
     
@@ -674,14 +629,10 @@ setup_max_compressed_backup() {
     read -p "⏰ Backup interval (hours) [default: 1]: " interval
     interval=${interval:-1}
     
-    # Simpan konfigurasi
     cat > "$CONFIG_FILE" << EOF
-# Maximum Compressed Backup Configuration
 TELEGRAM_BOT_TOKEN="$bot_token"
 TELEGRAM_CHAT_ID="$chat_id"
 BACKUP_INTERVAL="$interval"
-
-# Detection Results
 CLOUD_PROVIDER="$provider"
 BACKUP_TARGET="$backup_target"
 PROJECT_COUNT="$project_count"
@@ -693,15 +644,12 @@ JS_FILES="$js_files"
 JSON_FILES="$json_files"
 ESTIMATED_SIZE="$estimated_size"
 COMPRESSED_SIZE="$compressed_size"
-
-# Timestamps
 CREATED_DATE="$(date '+%Y-%m-%d %H:%M:%S')"
 EOF
     
     chmod 600 "$CONFIG_FILE"
     print_success "Configuration saved!"
     
-    # Setup crontab
     local cron_schedule="0 * * * *"
     case $interval in
         1) cron_schedule="0 * * * *" ;;
@@ -716,7 +664,6 @@ EOF
     (crontab -l 2>/dev/null; echo "$cron_schedule $0 --backup >/dev/null 2>&1") | crontab -
     print_success "Crontab configured"
     
-    # Test koneksi
     TELEGRAM_BOT_TOKEN="$bot_token"
     TELEGRAM_CHAT_ID="$chat_id"
     
@@ -765,22 +712,6 @@ show_help() {
     echo -e "  📏 ${BLUE}Ultra-small backup${NC} - maximum compression"
     echo -e "  🚀 ${BLUE}Fast upload${NC} - smaller files"
     echo
-    echo -e "${GREEN}Ultra Exclude Patterns:${NC}"
-    echo -e "  • ${RED}node_modules/*${NC} - Dependencies"
-    echo -e "  • ${RED}logs/*, log/*${NC} - Log files"
-    echo -e "  • ${RED}.local/*, .cache/*${NC} - Cache files"
-    echo -e "  • ${RED}.cargo/*, .rustup/*${NC} - Rust files"
-    echo -e "  • ${RED}go/*${NC} - Go workspace"
-    echo -e "  • ${RED}dist/*, build/*${NC} - Build artifacts"
-    echo -e "  • ${RED}temp/*, tmp/*${NC} - Temporary files"
-    echo -e "  • ${RED}.vscode/*${NC} - Editor files"
-    echo -e "  • ${RED}public/uploads/*${NC} - Upload files"
-    echo -e "  • ${RED}storage/logs/*${NC} - Storage logs"
-    echo -e "  • ${RED}*.log, *.lock${NC} - Log and lock files"
-    echo
-    echo -e "${GREEN}Compression Example:${NC}"
-    echo -e "  📏 ${BLUE}Before${NC}: 300MB → 🗜️ ${BLUE}After${NC}: 40-60MB (80% reduction)"
-    echo
     echo -e "${GREEN}Usage:${NC} $0 [OPTION]"
     echo
     echo -e "${GREEN}Options:${NC}"
@@ -788,10 +719,6 @@ show_help() {
     echo -e "  ${BLUE}--backup${NC}      Run maximum compressed backup"
     echo -e "  ${BLUE}--help${NC}        Show this help"
 }
-
-# ===================================================================
-# MAIN SCRIPT
-# ===================================================================
 
 main() {
     case "${1:-}" in
