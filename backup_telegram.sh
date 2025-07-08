@@ -1,9 +1,9 @@
 #!/bin/bash
 
 # ===================================================================
-# BACKUP TELEGRAM VPS - FIXED ZIP VERSION
-# ONLY: .env, .txt, .py, .js, package.json
-# Version: 4.2 - Fixed Syntax & Correct Filters
+# BACKUP TELEGRAM VPS - PROPER EXCLUDE PATTERNS
+# ONLY: .env, .txt, .py, .js, package.json with proper excludes
+# Version: 4.3 - Proper Exclude Patterns
 # ===================================================================
 
 set -euo pipefail
@@ -17,7 +17,7 @@ readonly CYAN='\033[0;36m'
 readonly NC='\033[0m'
 
 # Konfigurasi global
-readonly SCRIPT_VERSION="4.2"
+readonly SCRIPT_VERSION="4.3"
 readonly SCRIPT_NAME="backup_telegram"
 readonly MAX_BACKUP_SIZE=1073741824  # 1GB max
 readonly API_TIMEOUT=30
@@ -113,101 +113,166 @@ detect_cloud_provider() {
 }
 
 # ===================================================================
-# FUNGSI SCAN FILE SPESIFIK - FIXED
+# FUNGSI SCAN FILE DENGAN EXCLUDE YANG BENAR
 # ===================================================================
 
-scan_specific_files() {
-    local target_path="$1"
-    local temp_list="/tmp/backup_files_$$"
-    
-    # Clear temp file
-    > "$temp_list"
-    
-    print_info "Scanning for ONLY: .env, .txt, .py, .js, package.json"
-    
-    # Scan .env files
-    find "$target_path" -type f -name "*.env" \
-        ! -path "*/node_modules/*" \
-        ! -path "*/.cache/*" \
-        ! -path "*/.git/*" \
-        ! -path "*/tmp/*" \
-        ! -path "*/.backup-telegram/*" \
-        2>/dev/null >> "$temp_list" || true
-    
-    # Scan .txt files
-    find "$target_path" -type f -name "*.txt" \
-        ! -path "*/node_modules/*" \
-        ! -path "*/.cache/*" \
-        ! -path "*/.git/*" \
-        ! -path "*/tmp/*" \
-        ! -path "*/.backup-telegram/*" \
-        2>/dev/null >> "$temp_list" || true
-    
-    # Scan .py files
-    find "$target_path" -type f -name "*.py" \
-        ! -path "*/node_modules/*" \
-        ! -path "*/.cache/*" \
-        ! -path "*/.git/*" \
-        ! -path "*/tmp/*" \
-        ! -path "*/.backup-telegram/*" \
-        2>/dev/null >> "$temp_list" || true
-    
-    # Scan .js files
-    find "$target_path" -type f -name "*.js" \
-        ! -path "*/node_modules/*" \
-        ! -path "*/.cache/*" \
-        ! -path "*/.git/*" \
-        ! -path "*/tmp/*" \
-        ! -path "*/.backup-telegram/*" \
-        2>/dev/null >> "$temp_list" || true
-    
-    # Scan ONLY package.json files (FIXED - not all .json)
-    find "$target_path" -type f -name "package.json" \
-        ! -path "*/node_modules/*" \
-        ! -path "*/.cache/*" \
-        ! -path "*/.git/*" \
-        ! -path "*/tmp/*" \
-        ! -path "*/.backup-telegram/*" \
-        2>/dev/null >> "$temp_list" || true
-    
-    echo "$temp_list"
-}
-
-calculate_files_size() {
-    local file_list="$1"
-    local total_size=0
-    
-    if [[ -f "$file_list" ]]; then
-        while IFS= read -r file; do
-            if [[ -f "$file" ]]; then
-                local size=$(stat -c%s "$file" 2>/dev/null || echo 0)
-                total_size=$((total_size + size))
-            fi
-        done < "$file_list"
-    fi
-    
-    echo $total_size
-}
-
-count_files_by_type() {
+count_files_with_proper_excludes() {
     local target_path="$1"
     
-    # Count each file type separately
-    local env_count=$(find "$target_path" -name "*.env" ! -path "*/node_modules/*" ! -path "*/.cache/*" ! -path "*/.git/*" ! -path "*/tmp/*" 2>/dev/null | wc -l)
-    local txt_count=$(find "$target_path" -name "*.txt" ! -path "*/node_modules/*" ! -path "*/.cache/*" ! -path "*/.git/*" ! -path "*/tmp/*" 2>/dev/null | wc -l)
-    local py_count=$(find "$target_path" -name "*.py" ! -path "*/node_modules/*" ! -path "*/.cache/*" ! -path "*/.git/*" ! -path "*/tmp/*" 2>/dev/null | wc -l)
-    local js_count=$(find "$target_path" -name "*.js" ! -path "*/node_modules/*" ! -path "*/.cache/*" ! -path "*/.git/*" ! -path "*/tmp/*" 2>/dev/null | wc -l)
-    local json_count=$(find "$target_path" -name "package.json" ! -path "*/node_modules/*" ! -path "*/.cache/*" ! -path "*/.git/*" ! -path "*/tmp/*" 2>/dev/null | wc -l)
+    print_info "Counting files with proper exclude patterns..."
+    
+    # Count .env files
+    local env_count=$(find "$target_path" -name "*.env" \
+        ! -path "*/node_modules/*" \
+        ! -path "*/__pycache__/*" \
+        ! -path "*/.cache/*" \
+        ! -path "*/.npm/*" \
+        ! -path "*/.local/lib/python*/*" \
+        ! -path "*/.ipython/*" \
+        ! -path "*/.jupyter/*" \
+        ! -path "*/.ssh/*" \
+        ! -path "*/.local/share/jupyter/*" \
+        ! -path "*/.local/etc/jupyter/*" \
+        ! -path "*/.local/bin/*" \
+        ! -path "*/.git/*" \
+        ! -path "*/.local/share/Trash/*" \
+        ! -path "*/.local/*" \
+        ! -path "*/.rustup/*" \
+        ! -path "*/.cargo/*" \
+        ! -path "*/go/*" \
+        ! -path "*/.ipynb_checkpoints/*" \
+        2>/dev/null | wc -l)
+    
+    # Count .txt files
+    local txt_count=$(find "$target_path" -name "*.txt" \
+        ! -path "*/node_modules/*" \
+        ! -path "*/__pycache__/*" \
+        ! -path "*/.cache/*" \
+        ! -path "*/.npm/*" \
+        ! -path "*/.local/lib/python*/*" \
+        ! -path "*/.ipython/*" \
+        ! -path "*/.jupyter/*" \
+        ! -path "*/.ssh/*" \
+        ! -path "*/.local/share/jupyter/*" \
+        ! -path "*/.local/etc/jupyter/*" \
+        ! -path "*/.local/bin/*" \
+        ! -path "*/.git/*" \
+        ! -path "*/.local/share/Trash/*" \
+        ! -path "*/.local/*" \
+        ! -path "*/.rustup/*" \
+        ! -path "*/.cargo/*" \
+        ! -path "*/go/*" \
+        ! -path "*/.ipynb_checkpoints/*" \
+        2>/dev/null | wc -l)
+    
+    # Count .py files
+    local py_count=$(find "$target_path" -name "*.py" \
+        ! -path "*/node_modules/*" \
+        ! -path "*/__pycache__/*" \
+        ! -path "*/.cache/*" \
+        ! -path "*/.npm/*" \
+        ! -path "*/.local/lib/python*/*" \
+        ! -path "*/.ipython/*" \
+        ! -path "*/.jupyter/*" \
+        ! -path "*/.ssh/*" \
+        ! -path "*/.local/share/jupyter/*" \
+        ! -path "*/.local/etc/jupyter/*" \
+        ! -path "*/.local/bin/*" \
+        ! -path "*/.git/*" \
+        ! -path "*/.local/share/Trash/*" \
+        ! -path "*/.local/*" \
+        ! -path "*/.rustup/*" \
+        ! -path "*/.cargo/*" \
+        ! -path "*/go/*" \
+        ! -path "*/.ipynb_checkpoints/*" \
+        2>/dev/null | wc -l)
+    
+    # Count .js files
+    local js_count=$(find "$target_path" -name "*.js" \
+        ! -path "*/node_modules/*" \
+        ! -path "*/__pycache__/*" \
+        ! -path "*/.cache/*" \
+        ! -path "*/.npm/*" \
+        ! -path "*/.local/lib/python*/*" \
+        ! -path "*/.ipython/*" \
+        ! -path "*/.jupyter/*" \
+        ! -path "*/.ssh/*" \
+        ! -path "*/.local/share/jupyter/*" \
+        ! -path "*/.local/etc/jupyter/*" \
+        ! -path "*/.local/bin/*" \
+        ! -path "*/.git/*" \
+        ! -path "*/.local/share/Trash/*" \
+        ! -path "*/.local/*" \
+        ! -path "*/.rustup/*" \
+        ! -path "*/.cargo/*" \
+        ! -path "*/go/*" \
+        ! -path "*/.ipynb_checkpoints/*" \
+        2>/dev/null | wc -l)
+    
+    # Count package.json files
+    local json_count=$(find "$target_path" -name "package.json" \
+        ! -path "*/node_modules/*" \
+        ! -path "*/__pycache__/*" \
+        ! -path "*/.cache/*" \
+        ! -path "*/.npm/*" \
+        ! -path "*/.local/lib/python*/*" \
+        ! -path "*/.ipython/*" \
+        ! -path "*/.jupyter/*" \
+        ! -path "*/.ssh/*" \
+        ! -path "*/.local/share/jupyter/*" \
+        ! -path "*/.local/etc/jupyter/*" \
+        ! -path "*/.local/bin/*" \
+        ! -path "*/.git/*" \
+        ! -path "*/.local/share/Trash/*" \
+        ! -path "*/.local/*" \
+        ! -path "*/.rustup/*" \
+        ! -path "*/.cargo/*" \
+        ! -path "*/go/*" \
+        ! -path "*/.ipynb_checkpoints/*" \
+        2>/dev/null | wc -l)
     
     local total=$((env_count + txt_count + py_count + js_count + json_count))
     
     echo "$total|$env_count|$txt_count|$py_count|$js_count|$json_count"
 }
 
+calculate_files_size_with_excludes() {
+    local target_path="$1"
+    local total_size=0
+    
+    # Calculate size for each file type with proper excludes
+    for ext in "*.env" "*.txt" "*.py" "*.js" "package.json"; do
+        local size=$(find "$target_path" -name "$ext" \
+            ! -path "*/node_modules/*" \
+            ! -path "*/__pycache__/*" \
+            ! -path "*/.cache/*" \
+            ! -path "*/.npm/*" \
+            ! -path "*/.local/lib/python*/*" \
+            ! -path "*/.ipython/*" \
+            ! -path "*/.jupyter/*" \
+            ! -path "*/.ssh/*" \
+            ! -path "*/.local/share/jupyter/*" \
+            ! -path "*/.local/etc/jupyter/*" \
+            ! -path "*/.local/bin/*" \
+            ! -path "*/.git/*" \
+            ! -path "*/.local/share/Trash/*" \
+            ! -path "*/.local/*" \
+            ! -path "*/.rustup/*" \
+            ! -path "*/.cargo/*" \
+            ! -path "*/go/*" \
+            ! -path "*/.ipynb_checkpoints/*" \
+            -printf "%s\n" 2>/dev/null | \
+            awk '{sum += $1} END {print sum+0}' 2>/dev/null || echo 0)
+        
+        total_size=$((total_size + size))
+    done
+    
+    echo $total_size
+}
+
 bytes_to_human() {
     local bytes=$1
     
-    # Fixed syntax error - proper numeric comparison
     if [[ $bytes -gt 1073741824 ]]; then
         echo "$(( bytes / 1073741824 ))GB"
     elif [[ $bytes -gt 1048576 ]]; then
@@ -279,30 +344,49 @@ send_telegram_file() {
 }
 
 # ===================================================================
-# FUNGSI BACKUP ZIP
+# FUNGSI BACKUP ZIP DENGAN EXCLUDE YANG BENAR
 # ===================================================================
 
-create_zip_backup() {
+create_zip_backup_with_proper_excludes() {
     local backup_path="$1"
     local target_path="$2"
-    local temp_list=$(scan_specific_files "$target_path")
     
-    local file_count=$(wc -l < "$temp_list" 2>/dev/null || echo 0)
+    print_info "Creating ZIP with proper exclude patterns..."
     
-    if [[ $file_count -eq 0 ]]; then
-        print_warning "No files found matching criteria"
-        rm -f "$temp_list"
-        return 1
-    fi
+    # Gunakan zip dengan include dan exclude pattern seperti command manual Anda
+    zip -r "$backup_path" "$target_path" \
+        -i '*.env' '*.txt' '*.py' '*.js' 'package.json' \
+        -x "*/node_modules/*" \
+        -x "*/__pycache__/*" \
+        -x "*/.cache/*" \
+        -x "*/.npm/*" \
+        -x "*/.local/lib/python*/*" \
+        -x "*/.ipython/*" \
+        -x "*/.jupyter/*" \
+        -x "*/.jupyter_ystore.db" \
+        -x "*/.ssh/*" \
+        -x "*/.wget-hsts" \
+        -x "*/.bash_history" \
+        -x "*/.cloud-locale-test.skip" \
+        -x "*/.DS_Store" \
+        -x "*/.local/share/jupyter/*" \
+        -x "*/.local/etc/jupyter/*" \
+        -x "*/.local/bin/jupyter*" \
+        -x "*/.local/bin/ipython*" \
+        -x "*/.local/bin/debugpy*" \
+        -x "*/.git/*" \
+        -x "*/.gitattributes" \
+        -x "*/.gitignore" \
+        -x "*/.gitmodules" \
+        -x "*/.local/share/Trash/*" \
+        -x "*/.local/*" \
+        -x "*/.rustup/*" \
+        -x "*/.cargo/*" \
+        -x "*/go/*" \
+        -x "*/.ipynb_checkpoints/*" \
+        >> "$LOG_FILE" 2>&1
     
-    print_info "Creating ZIP archive with $file_count specific files..."
-    
-    # Create ZIP using file list
-    zip -@ "$backup_path" < "$temp_list" >> "$LOG_FILE" 2>&1
-    local zip_result=$?
-    
-    rm -f "$temp_list"
-    return $zip_result
+    return $?
 }
 
 # ===================================================================
@@ -331,7 +415,7 @@ run_zip_backup() {
     
     source "$CONFIG_FILE"
     
-    log_message "=== ZIP BACKUP STARTED ==="
+    log_message "=== ZIP BACKUP WITH PROPER EXCLUDES STARTED ==="
     
     # Deteksi provider dan path
     local provider_info=$(detect_cloud_provider)
@@ -340,7 +424,7 @@ run_zip_backup() {
     
     log_message "Provider: $provider"
     log_message "Target: $backup_target"
-    log_message "Files: .env, .txt, .py, .js, package.json ONLY"
+    log_message "Files: .env, .txt, .py, .js, package.json with proper excludes"
     
     # Validasi target
     if [[ ! -d "$backup_target" ]]; then
@@ -349,8 +433,8 @@ run_zip_backup() {
         return 1
     fi
     
-    # Hitung file dan size
-    local file_info=$(count_files_by_type "$backup_target")
+    # Hitung file dan size dengan exclude yang benar
+    local file_info=$(count_files_with_proper_excludes "$backup_target")
     local total_files=$(echo "$file_info" | cut -d'|' -f1)
     local env_files=$(echo "$file_info" | cut -d'|' -f2)
     local txt_files=$(echo "$file_info" | cut -d'|' -f3)
@@ -358,13 +442,11 @@ run_zip_backup() {
     local js_files=$(echo "$file_info" | cut -d'|' -f5)
     local json_files=$(echo "$file_info" | cut -d'|' -f6)
     
-    # Estimasi size
-    local temp_list=$(scan_specific_files "$backup_target")
-    local estimated_bytes=$(calculate_files_size "$temp_list")
+    # Estimasi size dengan exclude
+    local estimated_bytes=$(calculate_files_size_with_excludes "$backup_target")
     local estimated_size=$(bytes_to_human $estimated_bytes)
-    rm -f "$temp_list"
     
-    log_message "Found files: .env($env_files) .txt($txt_files) .py($py_files) .js($js_files) package.json($json_files)"
+    log_message "Found files with proper excludes: .env($env_files) .txt($txt_files) .py($py_files) .js($js_files) package.json($json_files)"
     log_message "Total: $total_files files, estimated size: $estimated_size"
     
     if [[ $estimated_bytes -gt $MAX_BACKUP_SIZE ]]; then
@@ -382,12 +464,13 @@ run_zip_backup() {
     fi
     
     # Kirim notifikasi awal
-    send_telegram_message "🔄 <b>ZIP Backup Started</b>
+    send_telegram_message "🔄 <b>ZIP Backup Started (Proper Excludes)</b>
 ☁️ Provider: ${provider}
 📂 Path: ${backup_target}
-📁 Types: .env, .txt, .py, .js, package.json ONLY
+📁 Types: .env, .txt, .py, .js, package.json
 📊 Files: ${total_files} (.env:${env_files} .txt:${txt_files} .py:${py_files} .js:${js_files} package.json:${json_files})
 📏 Est. Size: ${estimated_size}
+🚫 Excludes: .local, .cargo, .rustup, go, node_modules, __pycache__, .cache, .git
 📅 $(date '+%Y-%m-%d %H:%M:%S')"
     
     # Buat direktori backup
@@ -405,10 +488,10 @@ run_zip_backup() {
     local backup_filename="backup-files-${ip_server}${user_suffix}-${timestamp}.zip"
     local backup_full_path="${BACKUP_DIR}/${backup_filename}"
     
-    log_message "Creating ZIP backup: $backup_filename"
+    log_message "Creating ZIP backup with proper excludes: $backup_filename"
     
-    # Proses backup ZIP
-    if create_zip_backup "$backup_full_path" "$backup_target"; then
+    # Proses backup ZIP dengan exclude yang benar
+    if create_zip_backup_with_proper_excludes "$backup_full_path" "$backup_target"; then
         local end_time=$(date +%s)
         local duration=$((end_time - start_time))
         
@@ -423,17 +506,18 @@ run_zip_backup() {
                 return 1
             fi
             
-            log_message "ZIP backup created: $file_size (${duration}s)"
+            log_message "ZIP backup created with proper excludes: $file_size (${duration}s)"
             
             # Upload ke Telegram
-            local caption="📦 <b>ZIP Backup Complete</b>
+            local caption="📦 <b>ZIP Backup Complete (Proper Excludes)</b>
 ☁️ Provider: ${provider}
 📂 Path: ${backup_target}
-📁 Types: .env, .txt, .py, .js, package.json ONLY
+📁 Types: .env, .txt, .py, .js, package.json
 📊 Files: ${total_files}
 📋 Breakdown: .env(${env_files}) .txt(${txt_files}) .py(${py_files}) .js(${js_files}) package.json(${json_files})
 📏 Size: ${file_size}
 ⏱️ Duration: ${duration}s
+🚫 Excluded: .local, .cargo, .rustup, go, node_modules, cache
 📅 $(date '+%Y-%m-%d %H:%M:%S')
 ✅ Status: Success"
             
@@ -461,7 +545,7 @@ run_zip_backup() {
     
     # Cleanup
     rm -f "$LOCK_FILE"
-    log_message "=== ZIP BACKUP COMPLETED ==="
+    log_message "=== ZIP BACKUP WITH PROPER EXCLUDES COMPLETED ==="
 }
 
 # ===================================================================
@@ -471,7 +555,7 @@ run_zip_backup() {
 setup_backup() {
     clear
     echo -e "${CYAN}╔══════════════════════════════════════╗${NC}"
-    echo -e "${CYAN}║     ZIP BACKUP TELEGRAM VPS         ║${NC}"
+    echo -e "${CYAN}║     ZIP BACKUP WITH PROPER EXCLUDES  ║${NC}"
     echo -e "${CYAN}║  .env .txt .py .js package.json ONLY ║${NC}"
     echo -e "${CYAN}║            Version $SCRIPT_VERSION            ║${NC}"
     echo -e "${CYAN}╚══════════════════════════════════════╝${NC}"
@@ -482,9 +566,9 @@ setup_backup() {
     local provider=$(echo "$provider_info" | cut -d'|' -f1)
     local backup_target=$(echo "$provider_info" | cut -d'|' -f2)
     
-    # Scan file spesifik
-    print_info "Scanning for ONLY: .env, .txt, .py, .js, package.json"
-    local file_info=$(count_files_by_type "$backup_target")
+    # Scan file spesifik dengan exclude yang benar
+    print_info "Scanning with proper exclude patterns..."
+    local file_info=$(count_files_with_proper_excludes "$backup_target")
     local total_files=$(echo "$file_info" | cut -d'|' -f1)
     local env_files=$(echo "$file_info" | cut -d'|' -f2)
     local txt_files=$(echo "$file_info" | cut -d'|' -f3)
@@ -492,18 +576,16 @@ setup_backup() {
     local js_files=$(echo "$file_info" | cut -d'|' -f5)
     local json_files=$(echo "$file_info" | cut -d'|' -f6)
     
-    # Estimasi size
-    local temp_list=$(scan_specific_files "$backup_target")
-    local estimated_bytes=$(calculate_files_size "$temp_list")
+    # Estimasi size dengan exclude
+    local estimated_bytes=$(calculate_files_size_with_excludes "$backup_target")
     local estimated_size=$(bytes_to_human $estimated_bytes)
-    rm -f "$temp_list"
     
-    print_success "Fixed ZIP Backup Detection Results:"
+    print_success "ZIP Backup with Proper Excludes Detection:"
     echo "  👤 Current User: $CURRENT_USER"
     echo "  ☁️ Cloud Provider: $provider"
     echo "  📂 Target Path: $backup_target"
     echo "  📁 File Types: .env, .txt, .py, .js, package.json ONLY"
-    echo "  📊 Files Found:"
+    echo "  📊 Files Found (with proper excludes):"
     echo "    • .env files: $env_files"
     echo "    • .txt files: $txt_files"
     echo "    • .py files: $py_files"
@@ -511,6 +593,7 @@ setup_backup() {
     echo "    • package.json: $json_files"
     echo "  📋 Total Files: $total_files"
     echo "  📏 Estimated Size: $estimated_size"
+    echo "  🚫 Excludes: .local, .cargo, .rustup, go, node_modules, cache"
     echo "  📦 Output Format: ZIP"
     echo
     
@@ -535,7 +618,7 @@ setup_backup() {
     
     # Simpan konfigurasi
     cat > "$CONFIG_FILE" << EOF
-# Fixed ZIP Backup Configuration - Specific Files Only
+# ZIP Backup with Proper Excludes Configuration
 TELEGRAM_BOT_TOKEN="$bot_token"
 TELEGRAM_CHAT_ID="$chat_id"
 BACKUP_INTERVAL="$interval"
@@ -577,22 +660,24 @@ EOF
     TELEGRAM_BOT_TOKEN="$bot_token"
     TELEGRAM_CHAT_ID="$chat_id"
     
-    if send_telegram_message "🎉 <b>Fixed ZIP Backup Setup</b>
+    if send_telegram_message "🎉 <b>ZIP Backup with Proper Excludes Setup</b>
 ☁️ Provider: ${provider}
 📂 Path: ${backup_target}
-📁 Types: .env, .txt, .py, .js, package.json ONLY
+📁 Types: .env, .txt, .py, .js, package.json
 📊 Files: ${total_files}
 📋 Breakdown: .env(${env_files}) .txt(${txt_files}) .py(${py_files}) .js(${js_files}) package.json(${json_files})
 📏 Size: ${estimated_size}
+🚫 Excludes: .local, .cargo, .rustup, go, node_modules, cache
 📦 Format: ZIP
-✅ Fixed and ready!"; then
+✅ Proper excludes applied!"; then
         
         print_success "Setup completed successfully!"
         echo
-        echo -e "${GREEN}Fixed ZIP backup system ready!${NC}"
-        echo -e "  📁 Extensions: ${BLUE}.env, .txt, .py, .js, package.json ONLY${NC}"
+        echo -e "${GREEN}ZIP backup with proper excludes ready!${NC}"
+        echo -e "  📁 Extensions: ${BLUE}.env, .txt, .py, .js, package.json${NC}"
         echo -e "  📊 Total Files: ${BLUE}$total_files${NC}"
         echo -e "  📏 Size: ${BLUE}$estimated_size${NC}"
+        echo -e "  🚫 Excludes: ${BLUE}.local, .cargo, .rustup, go, node_modules${NC}"
         echo -e "  📦 Format: ${BLUE}ZIP${NC}"
         
     else
@@ -603,37 +688,35 @@ EOF
 
 show_help() {
     echo -e "${CYAN}╔══════════════════════════════════════╗${NC}"
-    echo -e "${CYAN}║     FIXED ZIP BACKUP TELEGRAM        ║${NC}"
+    echo -e "${CYAN}║     ZIP BACKUP WITH PROPER EXCLUDES  ║${NC}"
     echo -e "${CYAN}║   .env .txt .py .js package.json     ║${NC}"
-    echo -e "${CYAN}║      Version $SCRIPT_VERSION         ║${NC}"
+    echo -e "${CYAN}║            Version $SCRIPT_VERSION            ║${NC}"
     echo -e "${CYAN}╚══════════════════════════════════════╝${NC}"
     echo
-    echo -e "${GREEN}Fixed Features:${NC}"
-    echo -e "  🔧 ${BLUE}Fixed syntax error${NC} on line 174"
-    echo -e "  📦 ${BLUE}ZIP format output${NC} (not tar.gz)"
+    echo -e "${GREEN}Proper Excludes Features:${NC}"
+    echo -e "  🔧 ${BLUE}Proper exclude patterns${NC} like your manual command"
+    echo -e "  📦 ${BLUE}ZIP format output${NC}"
     echo -e "  📁 ${BLUE}ONLY 5 file types${NC}: .env, .txt, .py, .js, package.json"
-    echo -e "  🎯 ${BLUE}package.json filter${NC} - not all .json files"
-    echo -e "  📏 ${BLUE}Accurate size estimation${NC}"
-    echo -e "  🚀 ${BLUE}Fast backup${NC} - no unnecessary files"
+    echo -e "  🚫 ${BLUE}Comprehensive excludes${NC}: .local, .cargo, .rustup, go, node_modules"
+    echo -e "  📏 ${BLUE}Accurate file counting${NC} with excludes"
+    echo -e "  🚀 ${BLUE}Fast backup${NC} - no cache/temp files"
     echo
-    echo -e "${GREEN}File Types (ONLY):${NC}"
-    echo -e "  • ${BLUE}.env${NC} - Environment files"
-    echo -e "  • ${BLUE}.txt${NC} - Text files"
-    echo -e "  • ${BLUE}.py${NC} - Python files"
-    echo -e "  • ${BLUE}.js${NC} - JavaScript files"
-    echo -e "  • ${BLUE}package.json${NC} - NPM package files (NOT all .json)"
-    echo
-    echo -e "${RED}Excluded:${NC}"
-    echo -e "  • ${RED}.md${NC} - Markdown files (removed)"
-    echo -e "  • ${RED}.yml${NC} - YAML files (removed)"
-    echo -e "  • ${RED}.conf${NC} - Config files (removed)"
-    echo -e "  • ${RED}*.json${NC} - All other JSON files (only package.json included)"
+    echo -e "${GREEN}Exclude Patterns Applied:${NC}"
+    echo -e "  • ${RED}.local/*${NC} - Local user data"
+    echo -e "  • ${RED}.rustup/*${NC} - Rust toolchain"
+    echo -e "  • ${RED}.cargo/*${NC} - Cargo cache"
+    echo -e "  • ${RED}go/*${NC} - Go workspace"
+    echo -e "  • ${RED}node_modules/*${NC} - Node dependencies"
+    echo -e "  • ${RED}.ipynb_checkpoints/*${NC} - Jupyter checkpoints"
+    echo -e "  • ${RED}__pycache__/*${NC} - Python cache"
+    echo -e "  • ${RED}.cache/*${NC} - General cache"
+    echo -e "  • ${RED}.git/*${NC} - Git repositories"
     echo
     echo -e "${GREEN}Usage:${NC} $0 [OPTION]"
     echo
     echo -e "${GREEN}Options:${NC}"
-    echo -e "  ${BLUE}--setup${NC}       Setup fixed ZIP backup"
-    echo -e "  ${BLUE}--backup${NC}      Run fixed ZIP backup"
+    echo -e "  ${BLUE}--setup${NC}       Setup ZIP backup with proper excludes"
+    echo -e "  ${BLUE}--backup${NC}      Run ZIP backup with proper excludes"
     echo -e "  ${BLUE}--help${NC}        Show this help"
 }
 
@@ -650,9 +733,9 @@ main() {
             if [[ -f "$CONFIG_FILE" ]]; then
                 run_zip_backup
             else
-                print_info "Fixed ZIP Backup Telegram VPS - Version $SCRIPT_VERSION"
+                print_info "ZIP Backup with Proper Excludes - Version $SCRIPT_VERSION"
                 echo
-                read -p "Setup fixed ZIP backup for specific files now? (y/n): " -n 1 -r
+                read -p "Setup ZIP backup with proper excludes now? (y/n): " -n 1 -r
                 echo
                 if [[ $REPLY =~ ^[Yy]$ ]]; then
                     setup_backup
