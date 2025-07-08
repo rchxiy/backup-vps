@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # ===================================================================
-# BACKUP TELEGRAM VPS - SIMPLE & CLEAN VERSION
-# Project folders only, max 500MB, no config version
+# BACKUP TELEGRAM VPS - SPLIT ZIP VERSION
+# Project folders with auto-split for Telegram 50MB limit
 # ===================================================================
 
 set -euo pipefail
@@ -17,6 +17,7 @@ readonly NC='\033[0m'
 
 # Konfigurasi global
 readonly MAX_BACKUP_SIZE=524288000  # 500MB max
+readonly TELEGRAM_FILE_LIMIT=50331648  # 48MB untuk safety margin
 readonly API_TIMEOUT=30
 readonly UPLOAD_TIMEOUT=600
 readonly MAX_RETRIES=5
@@ -299,16 +300,22 @@ send_telegram_file() {
     local retry_count=0
     
     if [[ ! -f "$file_path" ]]; then
+        log_message "File not found: $file_path"
         return 1
     fi
     
     local file_size=$(stat -c%s "$file_path" 2>/dev/null || stat -f%z "$file_path" 2>/dev/null)
-    if [[ $file_size -gt 52428800 ]]; then
-        print_error "File too large for Telegram: $(bytes_to_human $file_size)"
+    
+    # Cek ukuran file sebelum upload
+    if [[ $file_size -gt $TELEGRAM_FILE_LIMIT ]]; then
+        print_error "File too large for Telegram: $(bytes_to_human $file_size) (max: $(bytes_to_human $TELEGRAM_FILE_LIMIT))"
+        log_message "File too large: $file_path ($(bytes_to_human $file_size))"
         return 1
     fi
     
     while [[ $retry_count -lt $MAX_RETRIES ]]; do
+        print_info "Uploading $(basename "$file_path") ($(bytes_to_human $file_size))..."
+        
         local response=$(curl -s --max-time "$UPLOAD_TIMEOUT" \
             -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendDocument" \
             -F chat_id="${TELEGRAM_CHAT_ID}" \
@@ -316,34 +323,46 @@ send_telegram_file() {
             -F caption="${caption}" 2>/dev/null)
         
         if [[ $response == *"\"ok\":true"* ]]; then
+            print_success "Uploaded: $(basename "$file_path")"
+            log_message "Upload successful: $(basename "$file_path")"
             return 0
         fi
         
         ((retry_count++))
-        sleep 5
+        if [[ $retry_count -lt $MAX_RETRIES ]]; then
+            print_warning "Upload retry $retry_count/$MAX_RETRIES for $(basename "$file_path")"
+            sleep 5
+        fi
     done
+    
+    print_error "Upload failed: $(basename "$file_path")"
+    log_message "Upload failed after $MAX_RETRIES attempts: $(basename "$file_path")"
     return 1
 }
 
 # ===================================================================
-# FUNGSI BACKUP
+# FUNGSI BACKUP DENGAN SPLIT ZIP
 # ===================================================================
 
-create_project_backup() {
+create_split_backup() {
     local backup_path="$1"
     local target_path="$2"
     local project_folders=($(detect_project_folders "$target_path"))
     
     if [[ ${#project_folders[@]} -eq 0 ]]; then
+        print_error "No project folders found"
         return 1
     fi
+    
+    print_info "Creating split ZIP backup (max 45MB per part)..."
     
     local zip_args=()
     for folder in "${project_folders[@]}"; do
         zip_args+=("$folder")
     done
     
-    zip -r "$backup_path" "${zip_args[@]}" \
+    # Buat ZIP dengan split 45MB untuk safety margin
+    zip -s 45m -r "$backup_path" "${zip_args[@]}" \
         -i '*.env' '*.txt' '*.py' '*.js' 'package.json' \
         -x "*/node_modules/*" \
         -x "*/.local/*" \
@@ -368,8 +387,106 @@ create_project_backup() {
         -x "*/.gitignore" \
         >> "$LOG_FILE" 2>&1
     
-    return $?
+    local result=$?
+    
+    if [[ $result -eq 0 ]]; then
+        print_success "Split ZIP created successfully"
+        log_message "Split ZIP backup created: $backup_path"
+    else
+        print_error "Split ZIP creation failed"
+        log_message "Split ZIP creation failed with exit code: $result"
+    fi
+    
+    return $result
 }
+
+upload_split_files() {
+    local backup_base="$1"
+    local caption_base="$2"
+    local uploaded_count=0
+    local failed_count=0
+    local total_size=0
+    
+    # Cari semua file split (z01, z02, ..., zip)
+    local split_files=()
+    
+    # Pattern untuk file split: backup-name.z01, backup-name.z02, ..., backup-name.zip
+    local base_name=$(basename "$backup_base" .zip)
+    local dir_name=$(dirname "$backup_base")
+    
+    # Cari file split dengan pattern
+    for file in "$dir_name"/"$base_name".z* "$dir_name"/"$base_name".zip; do
+        if [[ -f "$file" ]]; then
+            split_files+=("$file")
+        fi
+    done
+    
+    # Sort files untuk urutan yang benar
+    IFS=$'\n' split_files=($(sort <<<"${split_files[*]}"))
+    unset IFS
+    
+    local total_parts=${#split_files[@]}
+    
+    if [[ $total_parts -eq 0 ]]; then
+        print_error "No split files found"
+        return 1
+    fi
+    
+    print_info "Found $total_parts split parts to upload"
+    
+    # Upload setiap bagian
+    local part_num=1
+    for file in "${split_files[@]}"; do
+        local file_size=$(stat -c%s "$file" 2>/dev/null || stat -f%z "$file" 2>/dev/null)
+        total_size=$((total_size + file_size))
+        
+        local part_caption="$caption_base
+📦 Part $part_num/$total_parts
+📁 $(basename "$file")
+📏 $(bytes_to_human $file_size)"
+        
+        if send_telegram_file "$file" "$part_caption"; then
+            ((uploaded_count++))
+            print_success "Uploaded part $part_num/$total_parts"
+        else
+            ((failed_count++))
+            print_error "Failed to upload part $part_num/$total_parts"
+        fi
+        
+        ((part_num++))
+        
+        # Delay antar upload untuk menghindari rate limit
+        if [[ $part_num -le $total_parts ]]; then
+            sleep 2
+        fi
+    done
+    
+    # Kirim summary
+    local summary_msg="📊 <b>Upload Summary</b>
+✅ Uploaded: $uploaded_count/$total_parts parts
+❌ Failed: $failed_count parts
+📏 Total Size: $(bytes_to_human $total_size)
+📝 To extract: Download all parts and unzip the .zip file"
+    
+    send_telegram_message "$summary_msg"
+    
+    # Cleanup split files
+    for file in "${split_files[@]}"; do
+        rm -f "$file"
+    done
+    
+    log_message "Uploaded $uploaded_count/$total_parts parts, total size: $(bytes_to_human $total_size)"
+    
+    if [[ $failed_count -eq 0 ]]; then
+        return 0
+    else
+        return 1
+    fi
+}
+
+# ===================================================================
+# FUNGSI BACKUP UTAMA
+# ===================================================================
 
 run_backup() {
     local start_time=$(date +%s)
@@ -392,7 +509,7 @@ run_backup() {
     fi
     
     source "$CONFIG_FILE"
-    log_message "=== BACKUP STARTED ==="
+    log_message "=== SPLIT BACKUP STARTED ==="
     
     # Deteksi provider
     local provider_info=$(detect_cloud_provider)
@@ -408,6 +525,7 @@ run_backup() {
     fi
     
     # Scan files
+    print_info "Scanning project files..."
     local file_info=$(scan_project_files "$backup_target")
     local total_files=$(echo "$file_info" | cut -d'|' -f1)
     local env_files=$(echo "$file_info" | cut -d'|' -f2)
@@ -437,11 +555,12 @@ run_backup() {
     fi
     
     # Kirim notifikasi start
-    send_telegram_message "🔄 <b>Backup Started</b>
+    send_telegram_message "🔄 <b>Split Backup Started</b>
 ☁️ ${provider}
 📁 ${project_count} projects
 📊 ${total_files} files
 📏 ${estimated_size}
+📦 Will split if > 45MB per part
 ⏰ $(date '+%H:%M:%S')"
     
     # Buat backup
@@ -457,39 +576,27 @@ run_backup() {
     local backup_filename="backup-${ip_server}${user_suffix}-${timestamp}.zip"
     local backup_full_path="${BACKUP_DIR}/${backup_filename}"
     
-    if create_project_backup "$backup_full_path" "$backup_target"; then
+    print_info "Creating split backup..."
+    if create_split_backup "$backup_full_path" "$backup_target"; then
         local end_time=$(date +%s)
         local duration=$((end_time - start_time))
         
-        if [[ -f "$backup_full_path" ]]; then
-            local file_size_bytes=$(stat -c%s "$backup_full_path" 2>/dev/null || stat -f%z "$backup_full_path" 2>/dev/null)
-            local file_size=$(bytes_to_human $file_size_bytes)
-            
-            if [[ $file_size_bytes -lt 100 ]]; then
-                print_error "Backup file too small: $file_size"
-                rm -f "$backup_full_path"
-                rm -f "$LOCK_FILE"
-                return 1
-            fi
-            
-            # Upload ke Telegram
-            local caption="📦 <b>Backup Complete</b>
+        # Buat caption untuk upload
+        local caption="📦 <b>Split Backup Complete</b>
 ☁️ ${provider}
 📁 ${project_count} projects
 📊 ${total_files} files (.env:${env_files} .txt:${txt_files} .py:${py_files} .js:${js_files} package.json:${json_files})
-📏 ${file_size}
 ⏱️ ${duration}s
 📅 $(date '+%Y-%m-%d %H:%M:%S')
-✅ Success"
-            
-            if send_telegram_file "$backup_full_path" "$caption"; then
-                print_success "Backup completed: $backup_filename ($file_size)"
-                send_telegram_message "✅ <b>Backup Done!</b> ${backup_filename} (${file_size})"
-                rm -f "$backup_full_path"
-            else
-                print_error "Upload failed"
-                send_telegram_message "❌ <b>Upload Failed</b> - ${backup_filename}"
-            fi
+✅ Split into parts for Telegram limit"
+        
+        # Upload split files
+        if upload_split_files "$backup_full_path" "$caption"; then
+            print_success "Split backup completed and uploaded successfully"
+            send_telegram_message "✅ <b>Split Backup Success!</b> ${backup_filename} uploaded in parts"
+        else
+            print_error "Some parts failed to upload"
+            send_telegram_message "⚠️ <b>Partial Upload</b> - Some parts of ${backup_filename} failed to upload"
         fi
     else
         print_error "Backup creation failed"
@@ -497,7 +604,7 @@ run_backup() {
     fi
     
     rm -f "$LOCK_FILE"
-    log_message "=== BACKUP COMPLETED ==="
+    log_message "=== SPLIT BACKUP COMPLETED ==="
 }
 
 # ===================================================================
@@ -507,8 +614,8 @@ run_backup() {
 setup_backup() {
     clear
     echo -e "${CYAN}╔══════════════════════════════════════╗${NC}"
-    echo -e "${CYAN}║     SIMPLE BACKUP TELEGRAM VPS      ║${NC}"
-    echo -e "${CYAN}║        Clean & Simple Version       ║${NC}"
+    echo -e "${CYAN}║     SPLIT BACKUP TELEGRAM VPS       ║${NC}"
+    echo -e "${CYAN}║     Auto-Split for 50MB Limit       ║${NC}"
     echo -e "${CYAN}╚══════════════════════════════════════╝${NC}"
     echo
     
@@ -536,7 +643,7 @@ setup_backup() {
     local estimated_bytes=$(calculate_project_size "$backup_target")
     local estimated_size=$(bytes_to_human $estimated_bytes)
     
-    print_success "Simple Backup Detection Results:"
+    print_success "Split Backup Detection Results:"
     echo "  👤 Current User: $CURRENT_USER"
     echo "  ☁️ Cloud Provider: $provider"
     echo "  📂 Target Path: $backup_target"
@@ -545,6 +652,7 @@ setup_backup() {
     echo "  📋 Total Files: $total_files"
     echo "  📏 Estimated Size: $estimated_size"
     echo "  📦 Max Size: 500MB"
+    echo "  ✂️ Auto-split: 45MB per part for Telegram"
     echo
     
     if [[ $total_files -eq 0 ]]; then
@@ -564,7 +672,7 @@ setup_backup() {
     read -p "⏰ Interval (hours) [1]: " interval
     interval=${interval:-1}
     
-    # Simpan konfigurasi (tanpa SCRIPT_VERSION)
+    # Simpan konfigurasi
     cat > "$CONFIG_FILE" << EOF
 TELEGRAM_BOT_TOKEN="$bot_token"
 TELEGRAM_CHAT_ID="$chat_id"
@@ -599,14 +707,20 @@ EOF
     TELEGRAM_BOT_TOKEN="$bot_token"
     TELEGRAM_CHAT_ID="$chat_id"
     
-    if send_telegram_message "🎉 <b>Simple Backup Setup</b>
+    if send_telegram_message "🎉 <b>Split Backup Setup Complete</b>
 ☁️ ${provider}
 📁 ${project_count} projects
 📊 ${total_files} files
 📏 ${estimated_size}
 ⏰ Every ${interval}h
+✂️ Auto-split for Telegram 50MB limit
 ✅ Ready!"; then
         print_success "Setup completed!"
+        echo
+        echo -e "${GREEN}Split backup system ready!${NC}"
+        echo -e "  📦 Auto-split: Files > 45MB will be split into parts"
+        echo -e "  📱 Telegram: Each part will be uploaded separately"
+        echo -e "  📁 Extract: Download all parts and unzip the .zip file"
     else
         print_error "Setup failed!"
     fi
@@ -614,22 +728,29 @@ EOF
 
 show_help() {
     echo -e "${CYAN}╔══════════════════════════════════════╗${NC}"
-    echo -e "${CYAN}║     SIMPLE BACKUP TELEGRAM VPS      ║${NC}"
-    echo -e "${CYAN}║        Clean & Simple Version       ║${NC}"
+    echo -e "${CYAN}║     SPLIT BACKUP TELEGRAM VPS       ║${NC}"
+    echo -e "${CYAN}║     Auto-Split for 50MB Limit       ║${NC}"
     echo -e "${CYAN}╚══════════════════════════════════════╝${NC}"
     echo
-    echo -e "${GREEN}Simple Features:${NC}"
-    echo -e "  📦 ${BLUE}Max 500MB backup size${NC}"
+    echo -e "${GREEN}Split Backup Features:${NC}"
+    echo -e "  📦 ${BLUE}Auto-split ZIP files${NC} into 45MB parts"
+    echo -e "  📱 ${BLUE}Telegram 50MB limit${NC} compatible"
     echo -e "  🎯 ${BLUE}Project folders only${NC}"
-    echo -e "  🚫 ${BLUE}No config version issues${NC}"
-    echo -e "  ✨ ${BLUE}Clean & simple code${NC}"
-    echo -e "  📱 ${BLUE}Beautiful Telegram messages${NC}"
+    echo -e "  ✂️ ${BLUE}Smart splitting${NC} - only when needed"
+    echo -e "  📊 ${BLUE}Upload progress${NC} tracking"
+    echo -e "  🔄 ${BLUE}Retry mechanism${NC} for failed uploads"
+    echo
+    echo -e "${GREEN}How Split Works:${NC}"
+    echo -e "  1. Create ZIP backup of all projects"
+    echo -e "  2. If ZIP > 45MB, split into parts (.z01, .z02, .zip)"
+    echo -e "  3. Upload each part separately to Telegram"
+    echo -e "  4. To restore: Download all parts and unzip .zip file"
     echo
     echo -e "${GREEN}Usage:${NC} $0 [OPTION]"
     echo
     echo -e "${GREEN}Options:${NC}"
-    echo -e "  ${BLUE}--setup${NC}       Setup backup"
-    echo -e "  ${BLUE}--backup${NC}      Run backup"
+    echo -e "  ${BLUE}--setup${NC}       Setup split backup"
+    echo -e "  ${BLUE}--backup${NC}      Run split backup"
     echo -e "  ${BLUE}--help${NC}        Show help"
 }
 
@@ -646,9 +767,9 @@ main() {
             if [[ -f "$CONFIG_FILE" ]]; then
                 run_backup
             else
-                print_info "Simple Backup Telegram VPS"
+                print_info "Split Backup Telegram VPS"
                 echo
-                read -p "Setup backup now? (y/n): " -n 1 -r
+                read -p "Setup split backup now? (y/n): " -n 1 -r
                 echo
                 if [[ $REPLY =~ ^[Yy]$ ]]; then
                     setup_backup
