@@ -9,11 +9,10 @@ readonly BLUE='\033[0;34m'
 readonly CYAN='\033[0;36m'
 readonly NC='\033[0m'
 
-readonly SCRIPT_VERSION="6.1"
 readonly SCRIPT_NAME="backup_telegram"
-readonly MAX_BACKUP_SIZE=104857600
+readonly MAX_BACKUP_SIZE=304857600
 readonly API_TIMEOUT=30
-readonly UPLOAD_TIMEOUT=600
+readonly UPLOAD_TIMEOUT=1200
 readonly MAX_RETRIES=5
 
 CURRENT_USER=$(whoami)
