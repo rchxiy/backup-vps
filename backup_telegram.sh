@@ -9,11 +9,11 @@ readonly BLUE='\033[0;34m'
 readonly CYAN='\033[0;36m'
 readonly NC='\033[0m'
 
-readonly SCRIPT_VERSION="8.0"
+readonly SCRIPT_VERSION="8.1"
 readonly SCRIPT_NAME="backup_telegram"
-readonly MAX_BACKUP_SIZE=52428800
+readonly MAX_PROJECT_SIZE=52428800  # 50MB per project
 readonly API_TIMEOUT=30
-readonly UPLOAD_TIMEOUT=600
+readonly UPLOAD_TIMEOUT=300
 readonly MAX_RETRIES=3
 
 CURRENT_USER=$(whoami)
@@ -44,17 +44,19 @@ log_message() {
     local message="$1"
     local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
     mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null || true
-    echo "${timestamp} - ${message}" >> "$LOG_FILE"
+    echo "${timestamp} | ${message}" >> "$LOG_FILE"
 }
 
 get_primary_user() {
     local priority_users=("ichiazure" "azureuser" "ubuntu" "ec2-user" "debian")
+    
     for user in "${priority_users[@]}"; do
         if [[ -d "/home/$user" ]]; then
             echo "$user:/home/$user"
             return
         fi
     done
+    
     echo "root:/root"
 }
 
@@ -96,6 +98,7 @@ detect_project_folders() {
     while IFS= read -r -d '' folder; do
         local folder_name=$(basename "$folder")
         
+        # Skip system folders
         if [[ "$folder_name" =~ ^\. ]] || \
            [[ "$folder_name" == "snap" ]] || \
            [[ "$folder_name" == "tmp" ]] || \
@@ -109,10 +112,23 @@ detect_project_folders() {
             continue
         fi
         
-        if find "$folder" -maxdepth 3 \( -name "*.env" -o -name "package.json" -o -name "*.py" -o -name "*.js" \) \
+        # Check if folder contains project files
+        if find "$folder" -maxdepth 3 \( -name "*.env" -o -name "package.json" -o -name "*.py" -o -name "*.js" -o -name "*.txt" \) \
             ! -path "*/node_modules/*" \
+            ! -path "*/.local/*" \
+            ! -path "*/.rustup/*" \
+            ! -path "*/.cargo/*" \
+            ! -path "*/go/*" \
+            ! -path "*/.ipynb_checkpoints/*" \
+            ! -path "*/__pycache__/*" \
+            ! -path "*/.cache/*" \
             ! -path "*/.git/*" \
             ! -path "*/logs/*" \
+            ! -path "/logs/*" \
+            ! -path "*/build/*" \
+            ! -path "*/dist/*" \
+            ! -path "*/temp/*" \
+            ! -path "*/tmp/*" \
             -type f | head -1 | grep -q . 2>/dev/null; then
             project_folders+=("$folder")
         fi
@@ -124,6 +140,7 @@ detect_project_folders() {
 
 bytes_to_human() {
     local bytes=$1
+    
     if [[ $bytes -gt 1048576 ]]; then
         echo "$(( bytes / 1048576 ))MB"
     elif [[ $bytes -gt 1024 ]]; then
@@ -149,8 +166,11 @@ send_telegram_message() {
         fi
         
         ((retry_count++))
-        sleep 2
+        if [[ $retry_count -lt $MAX_RETRIES ]]; then
+            sleep 2
+        fi
     done
+    
     return 1
 }
 
@@ -164,8 +184,8 @@ send_telegram_file() {
     fi
     
     local file_size=$(stat -c%s "$file_path" 2>/dev/null || stat -f%z "$file_path" 2>/dev/null)
-    if [[ $file_size -gt $MAX_BACKUP_SIZE ]]; then
-        print_error "File too large: $(bytes_to_human $file_size)"
+    if [[ $file_size -gt 52428800 ]]; then
+        log_message "File too large: $(bytes_to_human $file_size)"
         return 1
     fi
     
@@ -181,49 +201,116 @@ send_telegram_file() {
         fi
         
         ((retry_count++))
-        sleep 3
+        if [[ $retry_count -lt $MAX_RETRIES ]]; then
+            sleep 3
+        fi
     done
+    
     return 1
 }
 
-create_project_backup() {
+backup_single_project() {
     local project_folder="$1"
-    local backup_path="$2"
+    local project_name=$(basename "$project_folder")
     
-    zip -9 -q -r "$backup_path" "$project_folder" \
+    # Get server IP
+    local ip_server=$(curl -s --max-time 5 ifconfig.me 2>/dev/null || echo "unknown")
+    
+    # Generate filename
+    local timestamp=$(date '+%d%m%Y')
+    local backup_filename="BACKUP-${project_name}_${ip_server}_${timestamp}.zip"
+    local backup_path="${BACKUP_DIR}/${backup_filename}"
+    
+    # Create backup directory
+    mkdir -p "$BACKUP_DIR"
+    
+    # Create ZIP for this project only
+    if zip -r "$backup_path" "$project_folder" \
         -i '*.env' '*.txt' '*.py' '*.js' 'package.json' \
         -x "*/node_modules/*" \
-        -x "*/logs/*" \
-        -x "*/log/*" \
-        -x "*/cache/*" \
-        -x "*/build/*" \
-        -x "*/dist/*" \
-        -x "*/temp/*" \
-        -x "*/tmp/*" \
-        -x "*/.git/*" \
-        -x "*/.cache/*" \
+        -x "*/.local/*" \
+        -x "*/.rustup/*" \
+        -x "*/.cargo/*" \
+        -x "*/go/*" \
+        -x "*/.ipynb_checkpoints/*" \
         -x "*/__pycache__/*" \
+        -x "*/.cache/*" \
+        -x "*/.npm/*" \
+        -x "*/.yarn/*" \
+        -x "*/.git/*" \
+        -x "*/dist/*" \
+        -x "*/build/*" \
         -x "*/.next/*" \
         -x "*/coverage/*" \
-        -x "*/.vscode/*" \
+        -x "*/logs/*" \
+        -x "/logs/*" \
+        -x "*/tmp/*" \
+        -x "*/temp/*" \
         -x "*/.DS_Store" \
-        >> "$LOG_FILE" 2>&1
-    
-    return $?
+        >> "$LOG_FILE" 2>&1; then
+        
+        # Check if file was created and has reasonable size
+        if [[ -f "$backup_path" ]]; then
+            local file_size=$(stat -c%s "$backup_path" 2>/dev/null || stat -f%z "$backup_path" 2>/dev/null)
+            local human_size=$(bytes_to_human $file_size)
+            
+            if [[ $file_size -lt 100 ]]; then
+                log_message "Project $project_name: backup too small ($human_size)"
+                rm -f "$backup_path"
+                return 1
+            fi
+            
+            if [[ $file_size -gt $MAX_PROJECT_SIZE ]]; then
+                log_message "Project $project_name: backup too large ($human_size)"
+                rm -f "$backup_path"
+                return 1
+            fi
+            
+            # Upload to Telegram
+            local caption="📦 <b>Project Backup</b>
+📁 <b>Project:</b> ${project_name}
+📏 <b>Size:</b> ${human_size}
+📅 <b>Date:</b> $(date '+%d/%m/%Y %H:%M')
+✅ <b>Status:</b> Complete"
+            
+            if send_telegram_file "$backup_path" "$caption"; then
+                log_message "Project $project_name: uploaded successfully ($human_size)"
+                rm -f "$backup_path"
+                return 0
+            else
+                log_message "Project $project_name: upload failed"
+                rm -f "$backup_path"
+                return 1
+            fi
+        else
+            log_message "Project $project_name: backup file not created"
+            return 1
+        fi
+    else
+        log_message "Project $project_name: ZIP creation failed"
+        return 1
+    fi
 }
 
 run_per_project_backup() {
     local start_time=$(date +%s)
     
+    print_info "Starting per project backup..."
+    log_message "=== PER PROJECT BACKUP STARTED ==="
+    
+    # Lock mechanism
     if [[ -f "$LOCK_FILE" ]]; then
         local pid=$(cat "$LOCK_FILE" 2>/dev/null || echo "")
         if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
             print_error "Backup already running (PID: $pid)"
             return 1
+        else
+            rm -f "$LOCK_FILE"
         fi
     fi
     echo $$ > "$LOCK_FILE"
     
+    # Load configuration
     if [[ ! -f "$CONFIG_FILE" ]]; then
         print_error "Configuration not found! Run: $0 --setup"
         rm -f "$LOCK_FILE"
@@ -231,8 +318,8 @@ run_per_project_backup() {
     fi
     
     source "$CONFIG_FILE"
-    log_message "=== PER PROJECT BACKUP STARTED ==="
     
+    # Detect provider and path
     local provider_info=$(detect_cloud_provider)
     local provider=$(echo "$provider_info" | cut -d'|' -f1)
     local backup_target=$(echo "$provider_info" | cut -d'|' -f2)
@@ -243,90 +330,78 @@ run_per_project_backup() {
         return 1
     fi
     
+    # Get project folders
     local project_folders=($(detect_project_folders "$backup_target"))
     local total_projects=${#project_folders[@]}
     
     if [[ $total_projects -eq 0 ]]; then
         print_warning "No project folders found"
-        send_telegram_message "⚠️ No projects found in $backup_target"
         rm -f "$LOCK_FILE"
         return 1
     fi
     
-    mkdir -p "$BACKUP_DIR"
-    local ip_server=$(curl -s --max-time 10 ifconfig.me 2>/dev/null || echo "unknown")
-    local date_stamp=$(date '+%d%m%Y')
+    log_message "Found $total_projects projects to backup"
     
-    send_telegram_message "🔄 <b>Backup Started</b>
-☁️ ${provider}
-📁 ${total_projects} projects
-📅 $(date '+%H:%M')"
+    # Send start notification
+    send_telegram_message "🚀 <b>Per Project Backup Started</b>
+☁️ <b>Provider:</b> ${provider}
+📁 <b>Projects:</b> ${total_projects}
+⏰ <b>Started:</b> $(date '+%H:%M:%S')"
     
+    # Backup each project individually
     local success_count=0
-    local fail_count=0
+    local failed_count=0
+    local current=0
     
     for project_folder in "${project_folders[@]}"; do
+        ((current++))
         local project_name=$(basename "$project_folder")
-        local backup_filename="BACKUP-${project_name}_${ip_server}_${date_stamp}.zip"
-        local backup_full_path="${BACKUP_DIR}/${backup_filename}"
         
-        print_info "Backing up project: $project_name"
-        log_message "Creating backup for project: $project_name"
+        print_info "Backing up project $current/$total_projects: $project_name"
+        log_message "Starting backup for project: $project_name ($current/$total_projects)"
         
-        send_telegram_message "🔄 ${project_name} backup start
-📂 ${project_folder}"
-        
-        if create_project_backup "$project_folder" "$backup_full_path"; then
-            if [[ -f "$backup_full_path" ]]; then
-                local file_size_bytes=$(stat -c%s "$backup_full_path" 2>/dev/null || stat -f%z "$backup_full_path" 2>/dev/null)
-                local file_size=$(bytes_to_human $file_size_bytes)
-                
-                if [[ $file_size_bytes -lt 100 ]]; then
-                    print_warning "Backup too small for $project_name: $file_size"
-                    send_telegram_message "⚠️ ${project_name} backup empty"
-                    rm -f "$backup_full_path"
-                    ((fail_count++))
-                    continue
-                fi
-                
-                if send_telegram_file "$backup_full_path" "✅ ${project_name} backup complete
-📏 Size: ${file_size}"; then
-                    print_success "Uploaded: $project_name ($file_size)"
-                    log_message "Successfully backed up and uploaded: $project_name ($file_size)"
-                    ((success_count++))
-                else
-                    print_error "Upload failed for $project_name"
-                    send_telegram_message "❌ ${project_name} upload failed"
-                    ((fail_count++))
-                fi
-                
-                rm -f "$backup_full_path"
-            else
-                print_error "Backup file not created for $project_name"
-                send_telegram_message "❌ ${project_name} backup failed"
-                ((fail_count++))
-            fi
+        # Backup this project (with error handling that doesn't stop the loop)
+        if backup_single_project "$project_folder"; then
+            print_success "Uploaded: $project_name"
+            ((success_count++))
         else
-            print_error "Backup creation failed for $project_name"
-            send_telegram_message "❌ ${project_name} backup failed"
-            ((fail_count++))
+            print_warning "Failed: $project_name"
+            ((failed_count++))
         fi
         
+        # Small delay between projects to avoid rate limiting
         sleep 2
     done
     
     local end_time=$(date +%s)
     local duration=$((end_time - start_time))
     
-    send_telegram_message "📊 <b>Backup Summary</b>
-✅ Success: ${success_count}
-❌ Failed: ${fail_count}
-⏱️ Duration: ${duration}s
-📅 $(date '+%Y-%m-%d %H:%M')"
+    # Send completion summary
+    local summary_message="✅ <b>Per Project Backup Complete</b>
+
+📊 <b>Summary:</b>
+• Total Projects: ${total_projects}
+• Successful: ${success_count}
+• Failed: ${failed_count}
+• Duration: ${duration}s
+
+⏰ <b>Completed:</b> $(date '+%H:%M:%S')"
     
-    rm -f "$LOCK_FILE"
+    send_telegram_message "$summary_message"
+    
+    log_message "Backup completed: $success_count success, $failed_count failed, ${duration}s"
     log_message "=== PER PROJECT BACKUP COMPLETED ==="
-    log_message "Summary: $success_count success, $fail_count failed, ${duration}s duration"
+    
+    # Cleanup
+    rm -f "$LOCK_FILE"
+    
+    if [[ $success_count -gt 0 ]]; then
+        print_success "Backup completed: $success_count/$total_projects projects uploaded"
+        return 0
+    else
+        print_error "All backups failed"
+        return 1
+    fi
 }
 
 setup_per_project_backup() {
@@ -338,17 +413,19 @@ setup_per_project_backup() {
     echo -e "${CYAN}╚══════════════════════════════════════╝${NC}"
     echo
     
+    # Detect provider and path
     local provider_info=$(detect_cloud_provider)
     local provider=$(echo "$provider_info" | cut -d'|' -f1)
     local backup_target=$(echo "$provider_info" | cut -d'|' -f2)
     
+    # Detect project folders
     print_info "Detecting project folders..."
     local project_folders=($(detect_project_folders "$backup_target"))
-    local total_projects=${#project_folders[@]}
     
     echo "📁 Project folders detected:"
-    if [[ $total_projects -eq 0 ]]; then
+    if [[ ${#project_folders[@]} -eq 0 ]]; then
         echo "  • No project folders found"
+        return 1
     else
         for folder in "${project_folders[@]}"; do
             local folder_name=$(basename "$folder")
@@ -361,22 +438,19 @@ setup_per_project_backup() {
     echo "  👤 Current User: $CURRENT_USER"
     echo "  ☁️ Cloud Provider: $provider"
     echo "  📂 Target Path: $backup_target"
-    echo "  📁 Project Folders: $total_projects"
+    echo "  📁 Project Folders: ${#project_folders[@]}"
     echo "  📦 Backup Mode: One ZIP per project"
     echo "  📏 File Types: .env, .txt, .py, .js, package.json"
     echo "  🚫 Excludes: node_modules, logs, cache, build, temp"
     echo "  📝 Naming: BACKUP-PROJECTNAME_IP_DDMMYYYY.zip"
     echo
     
-    if [[ $total_projects -eq 0 ]]; then
-        print_warning "No project folders found"
-        return 1
-    fi
-    
+    # Create directories
     mkdir -p "$SCRIPT_DIR"
     mkdir -p "$BACKUP_DIR"
     
-    echo -e "${YELLOW}Telegram Configuration:${NC}"
+    # Input configuration
+    echo "Telegram Configuration:"
     echo
     
     read -p "🤖 Bot Token: " bot_token
@@ -384,49 +458,55 @@ setup_per_project_backup() {
     read -p "⏰ Interval (hours) [24]: " interval
     interval=${interval:-24}
     
+    # Save configuration
     cat > "$CONFIG_FILE" << EOF
 TELEGRAM_BOT_TOKEN="$bot_token"
 TELEGRAM_CHAT_ID="$chat_id"
 BACKUP_INTERVAL="$interval"
 CLOUD_PROVIDER="$provider"
 BACKUP_TARGET="$backup_target"
-TOTAL_PROJECTS="$total_projects"
+PROJECT_COUNT="${#project_folders[@]}"
 CREATED_DATE="$(date '+%Y-%m-%d %H:%M:%S')"
+SCRIPT_VERSION="$SCRIPT_VERSION"
 EOF
     
     chmod 600 "$CONFIG_FILE"
     print_success "Configuration saved!"
     
-    local cron_schedule="0 3 * * *"
+    # Setup crontab
+    local cron_schedule="0 2 * * *"  # Default: daily at 2 AM
     case $interval in
         1) cron_schedule="0 * * * *" ;;
         2) cron_schedule="0 */2 * * *" ;;
         3) cron_schedule="0 */3 * * *" ;;
         6) cron_schedule="0 */6 * * *" ;;
         12) cron_schedule="0 */12 * * *" ;;
-        24) cron_schedule="0 3 * * *" ;;
+        24) cron_schedule="0 2 * * *" ;;
     esac
     
     crontab -l 2>/dev/null | grep -v "$SCRIPT_NAME" | crontab - 2>/dev/null || true
     (crontab -l 2>/dev/null; echo "$cron_schedule $0 --backup >/dev/null 2>&1") | crontab -
     print_success "Crontab configured"
     
+    # Test connection
     TELEGRAM_BOT_TOKEN="$bot_token"
     TELEGRAM_CHAT_ID="$chat_id"
     
     if send_telegram_message "🎉 <b>Per Project Backup Setup</b>
-☁️ ${provider}
-📁 ${total_projects} projects
-📦 One ZIP per project
+☁️ Provider: ${provider}
+📁 Projects: ${#project_folders[@]}
+📦 Mode: One ZIP per project
+⏰ Interval: ${interval}h
 ✅ Ready!"; then
         print_success "Setup completed!"
         echo
-        echo -e "${GREEN}Per project backup system ready!${NC}"
-        echo -e "  📁 Projects: ${BLUE}$total_projects${NC}"
-        echo -e "  📦 Mode: ${BLUE}One ZIP per project${NC}"
-        echo -e "  📝 Format: ${BLUE}BACKUP-PROJECTNAME_IP_DDMMYYYY.zip${NC}"
+        echo "Per project backup system ready!"
+        echo "  📁 Projects: ${#project_folders[@]}"
+        echo "  📦 Mode: One ZIP per project"
+        echo "  📝 Format: BACKUP-PROJECTNAME_IP_DDMMYYYY.zip"
     else
-        print_error "Setup failed!"
+        print_error "Setup failed! Check Telegram configuration."
+        return 1
     fi
 }
 
@@ -437,27 +517,32 @@ show_help() {
     echo -e "${CYAN}║            Version $SCRIPT_VERSION            ║${NC}"
     echo -e "${CYAN}╚══════════════════════════════════════╝${NC}"
     echo
-    echo -e "${GREEN}Per Project Features:${NC}"
-    echo -e "  📦 ${BLUE}One ZIP per project${NC} - no size limit issues"
-    echo -e "  📝 ${BLUE}Simple naming${NC} - BACKUP-PROJECTNAME_IP_DDMMYYYY.zip"
-    echo -e "  💬 ${BLUE}Clean messages${NC} - short and clear"
-    echo -e "  🎯 ${BLUE}Project detection${NC} - auto-find project folders"
-    echo -e "  🚫 ${BLUE}Smart excludes${NC} - skip node_modules, logs, cache"
-    echo -e "  📊 ${BLUE}Summary report${NC} - success/fail count"
+    echo -e "${GREEN}Features:${NC}"
+    echo -e "  📦 ${BLUE}One ZIP per project${NC} - Individual project backups"
+    echo -e "  📝 ${BLUE}Clean naming${NC} - BACKUP-PROJECTNAME_IP_DDMMYYYY.zip"
+    echo -e "  🔄 ${BLUE}Robust loop${NC} - Continues even if one project fails"
+    echo -e "  📊 ${BLUE}Progress tracking${NC} - Shows current project being backed up"
+    echo -e "  ✅ ${BLUE}Summary report${NC} - Success/failure count at the end"
     echo
     echo -e "${GREEN}Usage:${NC} $0 [OPTION]"
     echo
     echo -e "${GREEN}Options:${NC}"
     echo -e "  ${BLUE}--setup${NC}       Setup per project backup"
     echo -e "  ${BLUE}--backup${NC}      Run per project backup"
-    echo -e "  ${BLUE}--help${NC}        Show help"
+    echo -e "  ${BLUE}--help${NC}        Show this help"
 }
 
 main() {
     case "${1:-}" in
-        --setup) setup_per_project_backup ;;
-        --backup) run_per_project_backup ;;
-        --help) show_help ;;
+        --setup)
+            setup_per_project_backup
+            ;;
+        --backup)
+            run_per_project_backup
+            ;;
+        --help)
+            show_help
+            ;;
         *)
             if [[ -f "$CONFIG_FILE" ]]; then
                 run_per_project_backup
