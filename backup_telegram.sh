@@ -1,9 +1,9 @@
 #!/bin/bash
 
 # ===================================================================
-# BACKUP TELEGRAM VPS - ZIP VERSION WITH SPECIFIC FILES
-# Only backup: .env, .txt, .py, .js, package.json (not all .json)
-# Version: 4.1 - ZIP Format & Package.json Filter
+# BACKUP TELEGRAM VPS - FIXED ZIP VERSION
+# ONLY: .env, .txt, .py, .js, package.json
+# Version: 4.2 - Fixed Syntax & Correct Filters
 # ===================================================================
 
 set -euo pipefail
@@ -17,9 +17,9 @@ readonly CYAN='\033[0;36m'
 readonly NC='\033[0m'
 
 # Konfigurasi global
-readonly SCRIPT_VERSION="4.1"
+readonly SCRIPT_VERSION="4.2"
 readonly SCRIPT_NAME="backup_telegram"
-readonly MAX_BACKUP_SIZE=2147483648  # 2GB max
+readonly MAX_BACKUP_SIZE=1073741824  # 1GB max
 readonly API_TIMEOUT=30
 readonly UPLOAD_TIMEOUT=600
 readonly MAX_RETRIES=5
@@ -113,16 +113,17 @@ detect_cloud_provider() {
 }
 
 # ===================================================================
-# FUNGSI SCAN FILE SPESIFIK
+# FUNGSI SCAN FILE SPESIFIK - FIXED
 # ===================================================================
 
 scan_specific_files() {
     local target_path="$1"
     local temp_list="/tmp/backup_files_$$"
     
+    # Clear temp file
     > "$temp_list"
     
-    print_info "Scanning for specific files..."
+    print_info "Scanning for ONLY: .env, .txt, .py, .js, package.json"
     
     # Scan .env files
     find "$target_path" -type f -name "*.env" \
@@ -131,7 +132,7 @@ scan_specific_files() {
         ! -path "*/.git/*" \
         ! -path "*/tmp/*" \
         ! -path "*/.backup-telegram/*" \
-        2>/dev/null >> "$temp_list"
+        2>/dev/null >> "$temp_list" || true
     
     # Scan .txt files
     find "$target_path" -type f -name "*.txt" \
@@ -140,7 +141,7 @@ scan_specific_files() {
         ! -path "*/.git/*" \
         ! -path "*/tmp/*" \
         ! -path "*/.backup-telegram/*" \
-        2>/dev/null >> "$temp_list"
+        2>/dev/null >> "$temp_list" || true
     
     # Scan .py files
     find "$target_path" -type f -name "*.py" \
@@ -149,7 +150,7 @@ scan_specific_files() {
         ! -path "*/.git/*" \
         ! -path "*/tmp/*" \
         ! -path "*/.backup-telegram/*" \
-        2>/dev/null >> "$temp_list"
+        2>/dev/null >> "$temp_list" || true
     
     # Scan .js files
     find "$target_path" -type f -name "*.js" \
@@ -158,16 +159,16 @@ scan_specific_files() {
         ! -path "*/.git/*" \
         ! -path "*/tmp/*" \
         ! -path "*/.backup-telegram/*" \
-        2>/dev/null >> "$temp_list"
+        2>/dev/null >> "$temp_list" || true
     
-    # Scan ONLY package.json files (not all .json)
+    # Scan ONLY package.json files (FIXED - not all .json)
     find "$target_path" -type f -name "package.json" \
         ! -path "*/node_modules/*" \
         ! -path "*/.cache/*" \
         ! -path "*/.git/*" \
         ! -path "*/tmp/*" \
         ! -path "*/.backup-telegram/*" \
-        2>/dev/null >> "$temp_list"
+        2>/dev/null >> "$temp_list" || true
     
     echo "$temp_list"
 }
@@ -191,6 +192,7 @@ calculate_files_size() {
 count_files_by_type() {
     local target_path="$1"
     
+    # Count each file type separately
     local env_count=$(find "$target_path" -name "*.env" ! -path "*/node_modules/*" ! -path "*/.cache/*" ! -path "*/.git/*" ! -path "*/tmp/*" 2>/dev/null | wc -l)
     local txt_count=$(find "$target_path" -name "*.txt" ! -path "*/node_modules/*" ! -path "*/.cache/*" ! -path "*/.git/*" ! -path "*/tmp/*" 2>/dev/null | wc -l)
     local py_count=$(find "$target_path" -name "*.py" ! -path "*/node_modules/*" ! -path "*/.cache/*" ! -path "*/.git/*" ! -path "*/tmp/*" 2>/dev/null | wc -l)
@@ -204,15 +206,17 @@ count_files_by_type() {
 
 bytes_to_human() {
     local bytes=$1
-    local units=("B" "KB" "MB" "GB")
-    local unit=0
     
-    while [[ $bytes -gt 1024 && $unit -lt 3 ]]; do
-        bytes=$((bytes / 1024))
-        ((unit++))
-    done
-    
-    echo "${bytes}${units[$unit]}"
+    # Fixed syntax error - proper numeric comparison
+    if [[ $bytes -gt 1073741824 ]]; then
+        echo "$(( bytes / 1073741824 ))GB"
+    elif [[ $bytes -gt 1048576 ]]; then
+        echo "$(( bytes / 1048576 ))MB"
+    elif [[ $bytes -gt 1024 ]]; then
+        echo "$(( bytes / 1024 ))KB"
+    else
+        echo "${bytes}B"
+    fi
 }
 
 # ===================================================================
@@ -291,10 +295,9 @@ create_zip_backup() {
         return 1
     fi
     
-    print_info "Creating ZIP archive with $file_count files..."
+    print_info "Creating ZIP archive with $file_count specific files..."
     
-    # Buat ZIP menggunakan file list
-    # Gunakan @ untuk membaca file list dari stdin
+    # Create ZIP using file list
     zip -@ "$backup_path" < "$temp_list" >> "$LOG_FILE" 2>&1
     local zip_result=$?
     
@@ -337,7 +340,7 @@ run_zip_backup() {
     
     log_message "Provider: $provider"
     log_message "Target: $backup_target"
-    log_message "Files: .env, .txt, .py, .js, package.json"
+    log_message "Files: .env, .txt, .py, .js, package.json ONLY"
     
     # Validasi target
     if [[ ! -d "$backup_target" ]]; then
@@ -382,7 +385,7 @@ run_zip_backup() {
     send_telegram_message "🔄 <b>ZIP Backup Started</b>
 ☁️ Provider: ${provider}
 📂 Path: ${backup_target}
-📁 Types: .env, .txt, .py, .js, package.json
+📁 Types: .env, .txt, .py, .js, package.json ONLY
 📊 Files: ${total_files} (.env:${env_files} .txt:${txt_files} .py:${py_files} .js:${js_files} package.json:${json_files})
 📏 Est. Size: ${estimated_size}
 📅 $(date '+%Y-%m-%d %H:%M:%S')"
@@ -426,7 +429,7 @@ run_zip_backup() {
             local caption="📦 <b>ZIP Backup Complete</b>
 ☁️ Provider: ${provider}
 📂 Path: ${backup_target}
-📁 Types: .env, .txt, .py, .js, package.json
+📁 Types: .env, .txt, .py, .js, package.json ONLY
 📊 Files: ${total_files}
 📋 Breakdown: .env(${env_files}) .txt(${txt_files}) .py(${py_files}) .js(${js_files}) package.json(${json_files})
 📏 Size: ${file_size}
@@ -469,7 +472,7 @@ setup_backup() {
     clear
     echo -e "${CYAN}╔══════════════════════════════════════╗${NC}"
     echo -e "${CYAN}║     ZIP BACKUP TELEGRAM VPS         ║${NC}"
-    echo -e "${CYAN}║    .env .txt .py .js package.json    ║${NC}"
+    echo -e "${CYAN}║  .env .txt .py .js package.json ONLY ║${NC}"
     echo -e "${CYAN}║            Version $SCRIPT_VERSION            ║${NC}"
     echo -e "${CYAN}╚══════════════════════════════════════╝${NC}"
     echo
@@ -480,7 +483,7 @@ setup_backup() {
     local backup_target=$(echo "$provider_info" | cut -d'|' -f2)
     
     # Scan file spesifik
-    print_info "Scanning for specific file types..."
+    print_info "Scanning for ONLY: .env, .txt, .py, .js, package.json"
     local file_info=$(count_files_by_type "$backup_target")
     local total_files=$(echo "$file_info" | cut -d'|' -f1)
     local env_files=$(echo "$file_info" | cut -d'|' -f2)
@@ -495,7 +498,7 @@ setup_backup() {
     local estimated_size=$(bytes_to_human $estimated_bytes)
     rm -f "$temp_list"
     
-    print_success "ZIP Backup Detection Results:"
+    print_success "Fixed ZIP Backup Detection Results:"
     echo "  👤 Current User: $CURRENT_USER"
     echo "  ☁️ Cloud Provider: $provider"
     echo "  📂 Target Path: $backup_target"
@@ -532,7 +535,7 @@ setup_backup() {
     
     # Simpan konfigurasi
     cat > "$CONFIG_FILE" << EOF
-# ZIP Backup Configuration - Specific Files Only
+# Fixed ZIP Backup Configuration - Specific Files Only
 TELEGRAM_BOT_TOKEN="$bot_token"
 TELEGRAM_CHAT_ID="$chat_id"
 BACKUP_INTERVAL="$interval"
@@ -574,20 +577,20 @@ EOF
     TELEGRAM_BOT_TOKEN="$bot_token"
     TELEGRAM_CHAT_ID="$chat_id"
     
-    if send_telegram_message "🎉 <b>ZIP Backup Setup Complete</b>
+    if send_telegram_message "🎉 <b>Fixed ZIP Backup Setup</b>
 ☁️ Provider: ${provider}
 📂 Path: ${backup_target}
-📁 Types: .env, .txt, .py, .js, package.json
+📁 Types: .env, .txt, .py, .js, package.json ONLY
 📊 Files: ${total_files}
 📋 Breakdown: .env(${env_files}) .txt(${txt_files}) .py(${py_files}) .js(${js_files}) package.json(${json_files})
 📏 Size: ${estimated_size}
 📦 Format: ZIP
-✅ Ready for targeted ZIP backups!"; then
+✅ Fixed and ready!"; then
         
         print_success "Setup completed successfully!"
         echo
-        echo -e "${GREEN}ZIP backup system ready!${NC}"
-        echo -e "  📁 Extensions: ${BLUE}.env, .txt, .py, .js, package.json${NC}"
+        echo -e "${GREEN}Fixed ZIP backup system ready!${NC}"
+        echo -e "  📁 Extensions: ${BLUE}.env, .txt, .py, .js, package.json ONLY${NC}"
         echo -e "  📊 Total Files: ${BLUE}$total_files${NC}"
         echo -e "  📏 Size: ${BLUE}$estimated_size${NC}"
         echo -e "  📦 Format: ${BLUE}ZIP${NC}"
@@ -600,31 +603,37 @@ EOF
 
 show_help() {
     echo -e "${CYAN}╔══════════════════════════════════════╗${NC}"
-    echo -e "${CYAN}║     ZIP BACKUP TELEGRAM VPS         ║${NC}"
-    echo -e "${CYAN}║   Specific Files Only - ZIP Format   ║${NC}"
-    echo -e "${CYAN}║            Version $SCRIPT_VERSION            ║${NC}"
+    echo -e "${CYAN}║     FIXED ZIP BACKUP TELEGRAM        ║${NC}"
+    echo -e "${CYAN}║   .env .txt .py .js package.json     ║${NC}"
+    echo -e "${CYAN}║      Version $SCRIPT_VERSION         ║${NC}"
     echo -e "${CYAN}╚══════════════════════════════════════╝${NC}"
     echo
-    echo -e "${GREEN}ZIP Backup Features:${NC}"
+    echo -e "${GREEN}Fixed Features:${NC}"
+    echo -e "  🔧 ${BLUE}Fixed syntax error${NC} on line 174"
     echo -e "  📦 ${BLUE}ZIP format output${NC} (not tar.gz)"
-    echo -e "  📁 ${BLUE}Specific files only${NC}: .env, .txt, .py, .js, package.json"
+    echo -e "  📁 ${BLUE}ONLY 5 file types${NC}: .env, .txt, .py, .js, package.json"
     echo -e "  🎯 ${BLUE}package.json filter${NC} - not all .json files"
-    echo -e "  📏 ${BLUE}Accurate size estimation${NC} for targeted files"
-    echo -e "  🚀 ${BLUE}Fast backup${NC} - only essential files"
-    echo -e "  📊 ${BLUE}File type breakdown${NC} in notifications"
+    echo -e "  📏 ${BLUE}Accurate size estimation${NC}"
+    echo -e "  🚀 ${BLUE}Fast backup${NC} - no unnecessary files"
     echo
-    echo -e "${GREEN}File Types Included:${NC}"
+    echo -e "${GREEN}File Types (ONLY):${NC}"
     echo -e "  • ${BLUE}.env${NC} - Environment files"
     echo -e "  • ${BLUE}.txt${NC} - Text files"
     echo -e "  • ${BLUE}.py${NC} - Python files"
     echo -e "  • ${BLUE}.js${NC} - JavaScript files"
     echo -e "  • ${BLUE}package.json${NC} - NPM package files (NOT all .json)"
     echo
+    echo -e "${RED}Excluded:${NC}"
+    echo -e "  • ${RED}.md${NC} - Markdown files (removed)"
+    echo -e "  • ${RED}.yml${NC} - YAML files (removed)"
+    echo -e "  • ${RED}.conf${NC} - Config files (removed)"
+    echo -e "  • ${RED}*.json${NC} - All other JSON files (only package.json included)"
+    echo
     echo -e "${GREEN}Usage:${NC} $0 [OPTION]"
     echo
     echo -e "${GREEN}Options:${NC}"
-    echo -e "  ${BLUE}--setup${NC}       Setup ZIP backup"
-    echo -e "  ${BLUE}--backup${NC}      Run ZIP backup"
+    echo -e "  ${BLUE}--setup${NC}       Setup fixed ZIP backup"
+    echo -e "  ${BLUE}--backup${NC}      Run fixed ZIP backup"
     echo -e "  ${BLUE}--help${NC}        Show this help"
 }
 
@@ -641,9 +650,9 @@ main() {
             if [[ -f "$CONFIG_FILE" ]]; then
                 run_zip_backup
             else
-                print_info "ZIP Backup Telegram VPS - Version $SCRIPT_VERSION"
+                print_info "Fixed ZIP Backup Telegram VPS - Version $SCRIPT_VERSION"
                 echo
-                read -p "Setup ZIP backup for specific files now? (y/n): " -n 1 -r
+                read -p "Setup fixed ZIP backup for specific files now? (y/n): " -n 1 -r
                 echo
                 if [[ $REPLY =~ ^[Yy]$ ]]; then
                     setup_backup
